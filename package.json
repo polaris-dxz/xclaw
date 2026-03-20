@@ -1,0 +1,31 @@
+{
+  "name": "xclaw-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev": "pnpm dev:cleanup && concurrently --kill-others-on-fail \"pnpm dev:web\" \"pnpm dev:desktop\"",
+    "dev:all": "pnpm dev:cleanup && concurrently --kill-others-on-fail \"pnpm dev:studio-api\" \"pnpm dev:web\" \"pnpm dev:desktop\"",
+    "dev:cleanup": "node scripts/dev-cleanup.mjs",
+    "dev:web": "pnpm --filter @xclaw/web dev",
+    "dev:desktop": "pnpm --filter @xclaw/desktop dev",
+    "dev:studio-api": "pnpm --filter @xclaw/studio-api dev",
+    "build": "pnpm --filter @xclaw/web build",
+    "lint": "pnpm --filter @xclaw/web lint",
+    "typecheck": "pnpm --filter @xclaw/web typecheck",
+    "test": "pnpm --filter @xclaw/web test",
+    "electron:build": "pnpm --filter @xclaw/web build && pnpm --filter @xclaw/desktop build",
+    "electron:pack": "pnpm --filter @xclaw/desktop pack"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.0",
+    "turbo": "^2.5.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "electron",
+      "sharp"
+    ]
+  }
+}
