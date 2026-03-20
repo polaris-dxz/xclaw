@@ -1,0 +1,8 @@
+{
+  "name": "@xclaw/studio-api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "STUDIO_BACKEND_PORT=${STUDIO_BACKEND_PORT:-19101} STAR_BACKEND_PORT=${STUDIO_BACKEND_PORT:-19101} ../../.venv/bin/python apps/api/app.py"
+  }
+}
