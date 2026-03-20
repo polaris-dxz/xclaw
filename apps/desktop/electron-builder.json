@@ -1,0 +1,44 @@
+{
+  "appId": "com.xclaw.app",
+  "productName": "xclaw",
+  "directories": {
+    "output": "dist"
+  },
+  "files": [
+    "main.js",
+    "preload.js",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "../web/out",
+      "to": "web/out"
+    },
+    {
+      "from": "../studio-api",
+      "to": "studio-api",
+      "filter": [
+        "apps/**/*",
+        "assets/**/*",
+        "config/**/*",
+        "*.json",
+        "requirements.txt",
+        "uv.lock",
+        "pyproject.toml"
+      ]
+    }
+  ],
+  "mac": {
+    "category": "public.app-category.developer-tools",
+    "target": ["dmg", "zip"],
+    "icon": "public/icon.icns"
+  },
+  "win": {
+    "target": ["nsis"],
+    "icon": "public/icon.ico"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "category": "Development"
+  }
+}

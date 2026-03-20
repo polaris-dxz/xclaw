@@ -1,0 +1,16 @@
+{
+  "name": "@xclaw/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "dev": "wait-on http://127.0.0.1:20263 && env -u ELECTRON_RUN_AS_NODE -u CURSOR_CLI electron .",
+    "build": "electron-builder --config electron-builder.json",
+    "pack": "electron-builder --config electron-builder.json --dir"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "wait-on": "^8.0.0"
+  }
+}
