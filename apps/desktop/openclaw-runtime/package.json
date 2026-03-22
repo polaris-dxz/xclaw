@@ -1,0 +1,9 @@
+{
+  "name": "@xclaw-openclaw/runtime",
+  "version": "0.0.1",
+  "private": true,
+  "dependencies": {
+    "node": "22.16.0",
+    "openclaw": "2026.3.13"
+  }
+}
