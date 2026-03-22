@@ -1310,7 +1310,7 @@ def get_status():
 
 @app.route("/openclaw-chat", methods=["POST"])
 def openclaw_chat():
-    """Proxy one-shot chat to local OpenClaw Gateway HTTP /v1/chat/completions. Body: { \"message\": \"...\" }."""
+    """Standalone fallback: one-shot gateway chat. Embedded in xclaw 主应用 iframe 时走父页 /api/chat/messages，此路由仅用于独立打开 Studio 页面。"""
     try:
         data = request.get_json()
         if not isinstance(data, dict):

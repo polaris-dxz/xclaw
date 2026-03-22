@@ -45,6 +45,11 @@ apps/web/.data/
 # vercel
 .vercel
 
+# python
+__pycache__/
+*.py[cod]
+*.pyc
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
