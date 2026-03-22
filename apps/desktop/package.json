@@ -13,7 +13,7 @@
     "pack": "npm run prepare:openclaw-runtime && electron-builder --config electron-builder.json --dir"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "electron": "^35.7.5",
     "electron-builder": "^25.0.0",
     "wait-on": "^8.0.0"
   }
