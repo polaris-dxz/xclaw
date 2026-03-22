@@ -29,6 +29,10 @@ let embeddedGatewayShutdownRequested = false
 let embeddedGatewayRestartTimer = null
 let studioPort = normalizePort(process.env.STUDIO_BACKEND_PORT)
 let studioBaseUrl = `http://127.0.0.1:${studioPort}`
+/** Rust selection-sidecar 子进程（系统划词 NDJSON → 本机 TCP） */
+let selectionSidecarProcess = null
+/** 与 sidecar 的 NDJSON 长连接 */
+let selectionSidecarSocket = null
 
 function normalizePort(value) {
   const parsed = Number.parseInt(String(value || ''), 10)
@@ -439,6 +443,140 @@ async function waitForPortListening(port, host = '127.0.0.1', attempts = 40, int
   return false
 }
 
+function resolveSelectionSidecarBinary() {
+  const name = process.platform === 'win32' ? 'selection-sidecar.exe' : 'selection-sidecar'
+  if (isDev) {
+    const candidate = path.join(
+      __dirname,
+      '..',
+      '..',
+      'native',
+      'selection-sidecar',
+      'target',
+      'release',
+      name,
+    )
+    if (fs.existsSync(candidate)) return candidate
+    return null
+  }
+  const candidate = path.join(process.resourcesPath, 'selection-sidecar', name)
+  if (fs.existsSync(candidate)) return candidate
+  return null
+}
+
+function connectSelectionSidecarSocket(port) {
+  if (selectionSidecarSocket) {
+    try {
+      selectionSidecarSocket.destroy()
+    } catch {
+      /* ignore */
+    }
+    selectionSidecarSocket = null
+  }
+  const socket = net.createConnection({ port, host: '127.0.0.1' }, () => {
+    console.log('[selection-sidecar] tcp connected')
+  })
+  selectionSidecarSocket = socket
+  let buf = ''
+  socket.on('data', (chunk) => {
+    buf += chunk.toString()
+    const parts = buf.split('\n')
+    buf = parts.pop() || ''
+    for (const line of parts) {
+      if (!line.trim()) continue
+      try {
+        const msg = JSON.parse(line)
+        if (msg.type === 'selection.changed') {
+          const t = typeof msg.text === 'string' ? msg.text : ''
+          const preview = t.slice(0, 120)
+          console.log(
+            `[selection-sidecar] selection: ${preview}${t.length > 120 ? '…' : ''}`,
+          )
+        } else if (msg.type === 'accessibility.permission' && msg.trusted === false) {
+          console.warn(
+            '[selection-sidecar] 未授予辅助功能权限：请在「系统设置 → 隐私与安全性 → 辅助功能」中启用 xclaw。',
+          )
+        }
+      } catch {
+        /* ignore malformed line */
+      }
+    }
+  })
+  socket.on('error', (err) => {
+    console.warn(`[selection-sidecar] socket: ${err.message}`)
+  })
+}
+
+function startSelectionSidecar() {
+  if (process.env.XCLAW_DISABLE_SELECTION_SIDECAR === '1') {
+    console.log('[selection-sidecar] disabled (XCLAW_DISABLE_SELECTION_SIDECAR=1)')
+    return
+  }
+  const binary = resolveSelectionSidecarBinary()
+  if (!binary) {
+    console.warn(
+      '[selection-sidecar] binary not found (run `cargo build --release` in native/selection-sidecar)',
+    )
+    return
+  }
+  const args = []
+  if (process.env.XCLAW_SELECTION_SIDECAR_MOCK === '1') {
+    args.push('--mock')
+  }
+  const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  selectionSidecarProcess = child
+  let stdoutBuf = ''
+  child.stdout.on('data', (chunk) => {
+    stdoutBuf += chunk.toString()
+    const lines = stdoutBuf.split('\n')
+    stdoutBuf = lines.pop() || ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let msg
+      try {
+        msg = JSON.parse(trimmed)
+      } catch {
+        continue
+      }
+      if (msg.type === 'ready' && msg.port) {
+        connectSelectionSidecarSocket(msg.port)
+      }
+    }
+  })
+  child.stderr.on('data', (chunk) => {
+    process.stderr.write(`[selection-sidecar] ${chunk}`)
+  })
+  child.on('exit', (code) => {
+    selectionSidecarProcess = null
+    if (selectionSidecarSocket && !selectionSidecarSocket.destroyed) {
+      selectionSidecarSocket.destroy()
+    }
+    selectionSidecarSocket = null
+    console.log(`[selection-sidecar] process exited (${code})`)
+  })
+  child.on('error', (err) => {
+    console.error(`[selection-sidecar] failed to spawn: ${err.message}`)
+    selectionSidecarProcess = null
+  })
+}
+
+function stopSelectionSidecar() {
+  if (selectionSidecarSocket) {
+    try {
+      selectionSidecarSocket.destroy()
+    } catch {
+      /* ignore */
+    }
+    selectionSidecarSocket = null
+  }
+  if (!selectionSidecarProcess || selectionSidecarProcess.killed) {
+    return
+  }
+  selectionSidecarProcess.kill('SIGTERM')
+  selectionSidecarProcess = null
+}
+
 async function startEmbeddedOpenClaw() {
   if (embeddedOpenClawProcess) return
 
@@ -766,6 +904,7 @@ function createWindow() {
 app.whenReady().then(async () => {
   await startEmbeddedOpenClaw()
   await startStudioBackend()
+  startSelectionSidecar()
   installMacApplicationMenu()
   installNonMacApplicationMenu()
   createWindow()
@@ -789,6 +928,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopEmbeddedOpenClaw()
   stopStudioBackend()
+  stopSelectionSidecar()
 })
 
 // ------------------------------------------------------------------

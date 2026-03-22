@@ -33,6 +33,11 @@
       ]
     },
     {
+      "from": "../../native/selection-sidecar/target/release",
+      "to": "selection-sidecar",
+      "filter": ["selection-sidecar", "selection-sidecar.exe"]
+    },
+    {
       "from": "../studio-api",
       "to": "studio-api",
       "filter": [

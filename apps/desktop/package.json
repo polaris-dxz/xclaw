@@ -9,8 +9,9 @@
   "scripts": {
     "dev": "wait-on http://127.0.0.1:20263 && env -u ELECTRON_RUN_AS_NODE -u CURSOR_CLI electron .",
     "prepare:openclaw-runtime": "npm --prefix openclaw-runtime install --omit=dev --registry=https://registry.npmjs.org",
-    "build": "npm run prepare:openclaw-runtime && electron-builder --config electron-builder.json",
-    "pack": "npm run prepare:openclaw-runtime && electron-builder --config electron-builder.json --dir"
+    "build:selection-sidecar": "node ../../scripts/build-selection-sidecar.cjs",
+    "build": "npm run prepare:openclaw-runtime && npm run build:selection-sidecar && electron-builder --config electron-builder.json --publish never",
+    "pack": "npm run prepare:openclaw-runtime && npm run build:selection-sidecar && electron-builder --config electron-builder.json --dir --publish never"
   },
   "devDependencies": {
     "electron": "^35.7.5",
