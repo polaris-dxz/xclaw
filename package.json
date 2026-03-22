@@ -7,7 +7,7 @@
     "dev": "pnpm dev:cleanup && concurrently --kill-others-on-fail \"pnpm dev:web\" \"pnpm dev:desktop\"",
     "dev:all": "pnpm dev:cleanup && concurrently --kill-others-on-fail \"pnpm dev:studio-api\" \"pnpm dev:web\" \"pnpm dev:desktop\"",
     "dev:cleanup": "node scripts/dev-cleanup.mjs",
-    "dev:web": "pnpm --filter @xclaw/web dev",
+    "dev:web": "OPENCLAW_STATE_DIR=\"$HOME/.xclaw\" OPENCLAW_CONFIG_PATH=\"$HOME/.xclaw/openclaw.json\" OPENCLAW_GATEWAY_PORT=20064 OPENCLAW_GATEWAY_HOST=127.0.0.1 pnpm --filter @xclaw/web dev",
     "dev:desktop": "pnpm --filter @xclaw/desktop dev",
     "dev:studio-api": "pnpm --filter @xclaw/studio-api dev",
     "build": "pnpm --filter @xclaw/web build",
