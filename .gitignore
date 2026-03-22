@@ -33,6 +33,15 @@ apps/studio-api/asset-defaults.json
 apps/studio-api/assets/bg-history/
 apps/studio-api/assets/home-favorites/
 
+# runtime data (database, credentials, migration markers)
+.data/
+apps/web/.data/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.auto-generated
+**/.migrated-legacy-dbs.json
+
 # vercel
 .vercel
 
