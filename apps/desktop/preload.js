@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 平台信息
   platform: process.platform,
 
+  // 检查更新：打包页为 file:// 时无法请求 Next /api/releases/check，走主进程拉 GitHub
+  releasesCheckHttp: () => ipcRenderer.invoke('releases:check-http'),
+
   // 自动更新（electron-updater，仅打包生产环境生效）
   updaterCheck: () => ipcRenderer.invoke('updater:check'),
   updaterQuitAndInstall: () => ipcRenderer.invoke('updater:quit-and-install'),

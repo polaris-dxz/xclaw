@@ -22,7 +22,10 @@ function compareSemver(a: string, b: string): number {
 export async function GET() {
   try {
     const res = await fetch(GITHUB_RELEASES_URL, {
-      headers: { Accept: 'application/vnd.github+json' },
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `xclaw-web/${APP_VERSION} (Next.js)`,
+      },
       next: { revalidate: 3600 }, // ISR cache for 1 hour
     })
 
