@@ -600,6 +600,23 @@ function releaseTagUrl(version) {
   return `https://github.com/${GITHUB_RELEASE_OWNER}/${GITHUB_RELEASE_REPO}/releases/tag/v${v}`
 }
 
+/** 与 apps/web/app/api/releases/check/route.ts 一致，供 file:// 打包页无法请求 Next /api 时使用 */
+const GITHUB_RELEASES_API_URL =
+  process.env.XCLAW_RELEASES_URL ||
+  `https://api.github.com/repos/${GITHUB_RELEASE_OWNER}/${GITHUB_RELEASE_REPO}/releases/latest`
+
+function compareSemverForRelease(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map(Number)
+  const pb = String(b).replace(/^v/, '').split('.').map(Number)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] ?? 0
+    const nb = pb[i] ?? 0
+    if (na > nb) return 1
+    if (na < nb) return -1
+  }
+  return 0
+}
+
 function broadcastUpdaterStatus(payload) {
   for (const w of BrowserWindow.getAllWindows()) {
     if (!w.isDestroyed()) {
@@ -1022,6 +1039,51 @@ ipcMain.handle('set-theme', (_, theme) => {
 
 ipcMain.handle('get-app-version', () => {
   return app.getVersion()
+})
+
+/**
+ * 打包后页面为 file:// 静态资源，相对路径 /api/releases/check 无效；
+ * 由主进程请求 GitHub（与 Next route 行为对齐）。
+ */
+ipcMain.handle('releases:check-http', async () => {
+  const currentVersion = app.getVersion()
+  try {
+    const res = await fetch(GITHUB_RELEASES_API_URL, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        // GitHub API 要求有效 User-Agent，否则可能 403
+        'User-Agent': `xclaw-desktop/${currentVersion} (Electron)`,
+      },
+    })
+    if (!res.ok) {
+      return {
+        updateAvailable: false,
+        currentVersion,
+        latestVersion: undefined,
+        releaseUrl: '',
+        releaseNotes: '',
+        readyToInstall: false,
+      }
+    }
+    const release = await res.json()
+    const latestVersion = String(release.tag_name ?? '').replace(/^v/, '')
+    const updateAvailable = compareSemverForRelease(latestVersion, currentVersion) > 0
+    return {
+      updateAvailable,
+      currentVersion,
+      latestVersion,
+      releaseUrl: release.html_url ?? '',
+      releaseNotes: typeof release.body === 'string' ? release.body : '',
+      readyToInstall: false,
+    }
+  } catch (e) {
+    console.warn('[releases:check-http]', e.message)
+    return {
+      updateAvailable: false,
+      currentVersion,
+      readyToInstall: false,
+    }
+  }
 })
 
 ipcMain.handle('studio:get-base-url', () => {
