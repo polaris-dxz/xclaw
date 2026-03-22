@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 平台信息
   platform: process.platform,
 
+  /** 打开「实时双语字幕」独立悬浮窗（主窗口最小化后仍可显示） */
+  openSubtitleOverlay: () => ipcRenderer.invoke('subtitle-overlay:open'),
+
   // 检查更新：打包页为 file:// 时无法请求 Next /api/releases/check，走主进程拉 GitHub
   releasesCheckHttp: () => ipcRenderer.invoke('releases:check-http'),
 

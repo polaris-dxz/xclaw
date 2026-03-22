@@ -13,6 +13,10 @@ const GITHUB_RELEASE_REPO = 'xclaw'
 
 let electronAutoUpdater = null
 let pendingInstallUpdateInfo = null
+/** 主窗口引用（用于生命周期联动） */
+let mainWindow = null
+/** 豆包式「实时双语字幕」独立悬浮窗：与主窗体解耦，最小化主窗仍可显示 */
+let subtitleOverlayWindow = null
 const defaultStudioPort = 19101
 const embeddedGatewayHost = '127.0.0.1'
 const embeddedGatewayPort = 20064
@@ -676,8 +680,49 @@ function initElectronUpdater() {
   }, 6 * 60 * 60 * 1000)
 }
 
+function closeSubtitleOverlayWindow() {
+  if (subtitleOverlayWindow && !subtitleOverlayWindow.isDestroyed()) {
+    subtitleOverlayWindow.close()
+  }
+  subtitleOverlayWindow = null
+}
+
+function createSubtitleOverlayWindow() {
+  if (subtitleOverlayWindow && !subtitleOverlayWindow.isDestroyed()) {
+    subtitleOverlayWindow.show()
+    subtitleOverlayWindow.focus()
+    return
+  }
+  const htmlPath = path.join(__dirname, 'subtitle-overlay.html')
+  subtitleOverlayWindow = new BrowserWindow({
+    width: 560,
+    height: 248,
+    minWidth: 380,
+    minHeight: 140,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: true,
+    show: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload-subtitle.js'),
+    },
+  })
+  subtitleOverlayWindow.loadFile(htmlPath)
+  subtitleOverlayWindow.once('ready-to-show', () => {
+    subtitleOverlayWindow.show()
+  })
+  subtitleOverlayWindow.on('closed', () => {
+    subtitleOverlayWindow = null
+  })
+}
+
 function createWindow() {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1000,
@@ -700,6 +745,11 @@ function createWindow() {
 
   mainWindow.loadURL(startUrl)
 
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    closeSubtitleOverlayWindow()
+  })
+
   // 开发模式下打开开发者工具
   if (isDev) {
     mainWindow.webContents.openDevTools()
@@ -707,7 +757,9 @@ function createWindow() {
 
   // 监听主题变化
   nativeTheme.on('updated', () => {
-    mainWindow.webContents.send('theme-changed', nativeTheme.shouldUseDarkColors ? 'dark' : 'light')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('theme-changed', nativeTheme.shouldUseDarkColors ? 'dark' : 'light')
+    }
   })
 }
 
@@ -715,6 +767,7 @@ app.whenReady().then(async () => {
   await startEmbeddedOpenClaw()
   await startStudioBackend()
   installMacApplicationMenu()
+  installNonMacApplicationMenu()
   createWindow()
   initElectronUpdater()
 
@@ -985,6 +1038,12 @@ function installMacApplicationMenu() {
         { role: 'about' },
         { type: 'separator' },
         {
+          label: '实时双语字幕…',
+          accelerator: 'Alt+Command+S',
+          click: () => createSubtitleOverlayWindow(),
+        },
+        { type: 'separator' },
+        {
           label: 'Install \'xclaw\' command in PATH',
           click: () => {
             void handlers.install()
@@ -1027,6 +1086,26 @@ function installMacApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+/** Windows / Linux：提供菜单入口打开字幕悬浮窗（macOS 使用 installMacApplicationMenu 内项） */
+function installNonMacApplicationMenu() {
+  if (process.platform === 'darwin') return
+  const template = [
+    {
+      label: 'Tools',
+      submenu: [
+        {
+          label: '实时双语字幕',
+          accelerator: 'Alt+Shift+S',
+          click: () => createSubtitleOverlayWindow(),
+        },
+      ],
+    },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 // IPC 处理
 ipcMain.handle('get-system-theme', () => {
   return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
@@ -1039,6 +1118,25 @@ ipcMain.handle('set-theme', (_, theme) => {
 
 ipcMain.handle('get-app-version', () => {
   return app.getVersion()
+})
+
+ipcMain.handle('subtitle-overlay:open', () => {
+  createSubtitleOverlayWindow()
+  return { ok: true }
+})
+
+ipcMain.on('subtitle-overlay:close', () => {
+  closeSubtitleOverlayWindow()
+})
+
+ipcMain.on('subtitle-overlay:expand', (_, expanded) => {
+  if (!subtitleOverlayWindow || subtitleOverlayWindow.isDestroyed()) return
+  const [w, h] = subtitleOverlayWindow.getSize()
+  if (expanded) {
+    subtitleOverlayWindow.setSize(Math.max(w, 560), Math.max(h, 360))
+  } else {
+    subtitleOverlayWindow.setSize(560, 248)
+  }
 })
 
 /**

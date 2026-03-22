@@ -31,6 +31,8 @@ export function getElectronUpdaterApi() {
   return (
     window as Window & {
       electronAPI?: {
+        /** 打开实时双语字幕悬浮窗（Electron） */
+        openSubtitleOverlay?: () => Promise<{ ok: boolean }>
         /** 桌面端打包为 file:// 时须走主进程请求 GitHub，见 main.js releases:check-http */
         releasesCheckHttp?: () => Promise<ReleaseCheckPayload>
         updaterCheck?: () => Promise<ElectronUpdaterCheckResult>
