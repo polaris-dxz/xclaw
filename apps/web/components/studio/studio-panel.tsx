@@ -1,18 +1,41 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { AlertCircle, Loader2 } from 'lucide-react'
 import { buildStudioBaseUrl, buildStudioEmbedUrl, buildStudioHealthUrl } from '@/lib/studio/runtime'
+import { sendStudioChatMessage } from '@/lib/studio/send-studio-chat'
+import {
+  STUDIO_CHAT_CONTEXT,
+  STUDIO_CHAT_RESULT,
+  STUDIO_CHAT_SEND,
+  type StudioChatResultPayload,
+} from '@/lib/studio/studio-chat-protocol'
+import { useXClawStore } from '@/store'
 import { Button } from '@/components/ui/button'
 
 export function StudioPanel() {
+  const iframeRef = useRef<HTMLIFrameElement>(null)
   const [studioUrl, setStudioUrl] = useState<string>('')
   const [status, setStatus] = useState<'checking' | 'online' | 'offline'>('checking')
+  const activeConversation = useXClawStore((s) => s.activeConversation)
+
+  const pushChatContextToIframe = useCallback(() => {
+    const win = iframeRef.current?.contentWindow
+    if (!win || !studioUrl) return
+    try {
+      const targetOrigin = new URL(studioUrl).origin
+      win.postMessage(
+        { type: STUDIO_CHAT_CONTEXT, conversationId: activeConversation ?? null },
+        targetOrigin
+      )
+    } catch {
+      // ignore invalid studioUrl
+    }
+  }, [studioUrl, activeConversation])
 
   useEffect(() => {
     let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | undefined
 
     const resolveBaseUrl = async () => {
       const electronApi = (window as Window & { electronAPI?: { getStudioBaseUrl?: () => Promise<string> } }).electronAPI
@@ -34,12 +57,11 @@ export function StudioPanel() {
       setStudioUrl(baseUrl)
       setStatus('checking')
       try {
-        const response = await fetch(buildStudioHealthUrl(baseUrl), {
+        await fetch(buildStudioHealthUrl(baseUrl), {
           cache: 'no-store',
           mode: 'no-cors',
         })
         if (!cancelled) {
-          // no-cors 响应在浏览器中通常是 opaque，无法读取 ok；能完成请求就先视为 online。
           setStatus('online')
         }
       } catch {
@@ -47,31 +69,73 @@ export function StudioPanel() {
           setStatus('offline')
         }
       }
-
-      timer = setTimeout(checkHealth, 5000)
     }
 
     void checkHealth()
 
     return () => {
       cancelled = true
-      if (timer) {
-        clearTimeout(timer)
-      }
     }
   }, [])
+
+  useEffect(() => {
+    pushChatContextToIframe()
+  }, [pushChatContextToIframe])
+
+  useEffect(() => {
+    const onMessage = async (ev: MessageEvent) => {
+      if (ev.source !== iframeRef.current?.contentWindow) return
+      if (!studioUrl) return
+      let allowedOrigin: string
+      try {
+        allowedOrigin = new URL(studioUrl).origin
+      } catch {
+        return
+      }
+      if (ev.origin !== allowedOrigin) return
+
+      const data = ev.data as { type?: string; requestId?: string; text?: string }
+      if (!data || data.type !== STUDIO_CHAT_SEND || typeof data.requestId !== 'string') return
+      const text = typeof data.text === 'string' ? data.text : ''
+
+      const replyPayload = (partial: Omit<StudioChatResultPayload, 'type' | 'requestId'> & { requestId: string }) => {
+        const win = iframeRef.current?.contentWindow
+        if (!win) return
+        const payload: StudioChatResultPayload = {
+          type: STUDIO_CHAT_RESULT,
+          requestId: partial.requestId,
+          ok: partial.ok,
+          error: partial.error,
+          reply: partial.reply,
+        }
+        win.postMessage(payload, allowedOrigin)
+      }
+
+      const result = await sendStudioChatMessage(text)
+      if (!result.ok) {
+        replyPayload({ requestId: data.requestId, ok: false, error: result.error })
+        return
+      }
+      const replyText =
+        result.reply?.trim() ||
+        '消息已发送到当前会话，可在左侧「对话」中查看完整回复与上下文。'
+      replyPayload({ requestId: data.requestId, ok: true, reply: replyText })
+    }
+
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [studioUrl])
 
   if (studioUrl) {
     return (
       <div className="relative flex-1 h-full min-h-0 overflow-hidden">
         <iframe
+          ref={iframeRef}
           title="Star Office Studio"
           src={buildStudioEmbedUrl(studioUrl)}
           className="block h-full min-h-0 w-full border-0"
+          onLoad={pushChatContextToIframe}
         />
-        <div className="absolute top-3 right-3 z-10 rounded-md bg-background/80 backdrop-blur px-2 py-1 text-xs border border-border/60">
-          {status === 'offline' ? '后端连接失败，已直接加载页面' : status === 'checking' ? '检查连接中...' : 'Studio 在线'}
-        </div>
       </div>
     )
   }
