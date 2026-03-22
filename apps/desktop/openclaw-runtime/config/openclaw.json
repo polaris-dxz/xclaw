@@ -1,0 +1,119 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {},
+      "workspace": "~/.xclaw/workspace",
+      "maxConcurrent": 3,
+      "timeoutSeconds": 72000
+    }
+  },
+  "skills": {
+    "load": {
+      "extraDirs": [
+        "./skills"
+      ]
+    }
+  },
+  "browser": {
+    "enabled": true,
+    "defaultProfile": "openclaw",
+    "ssrfPolicy": {
+      "dangerouslyAllowPrivateNetwork": false
+    }
+  },
+  "channels": {},
+  "gateway": {
+    "port": 20064,
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": ""
+    },
+    "controlUi": {
+      "allowedOrigins": [
+        "null",
+        "file://"
+      ],
+      "dangerouslyDisableDeviceAuth": true
+    },
+    "tailscale": {
+      "mode": "off",
+      "resetOnExit": false
+    }
+  },
+  "plugins": {
+    "enabled": true,
+    "allow": [
+      "openclaw-weixin",
+      "wechat-access",
+      "content-plugin",
+      "tool-sandbox",
+      "qmemory",
+      "openclaw-qqbot",
+      "dingtalk-connector",
+      "wecom-openclaw-plugin",
+      "pcmgr-ai-security"
+    ],
+    "load": {
+      "paths": [
+        "./extensions"
+      ]
+    },
+    "entries": {
+      "openclaw-weixin": {
+        "enabled": false,
+        "config": {}
+      },
+      "wechat-access": {
+        "enabled": true
+      },
+      "content-plugin": {
+        "enabled": true,
+        "config": {
+          "token": ""
+        }
+      },
+      "qmemory": {
+        "enabled": true,
+        "config": {}
+      },
+      "tool-sandbox": {
+        "enabled": true,
+        "config": {}
+      },
+      "openclaw-qqbot": {
+        "enabled": false,
+        "config": {}
+      },
+      "dingtalk-connector": {
+        "enabled": false,
+        "config": {}
+      },
+      "wecom-openclaw-plugin": {
+        "enabled": false,
+        "config": {}
+      },
+      "pcmgr-ai-security": {
+        "enabled": true,
+        "config": {
+          "appId": "",
+          "softid": 1
+        }
+      }
+    }
+  },
+  "session": {
+    "reset": {
+      "mode": "idle",
+      "idleMinutes": 525600
+    },
+    "maintenance": {
+      "pruneAfter": "365d",
+      "maxEntries": 1000000,
+      "resetArchiveRetention": false,
+      "rotateBytes": "1gb"
+    },
+    "dmScope": "per-channel-peer"
+  }
+}

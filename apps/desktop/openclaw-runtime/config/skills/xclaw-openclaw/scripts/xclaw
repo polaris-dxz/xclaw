@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# 可放入 PATH（如 ln -sf 本文件 ~/bin/xclaw）；解析符号链接以定位同目录的 xclaw-mac.sh
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+exec "${DIR}/xclaw-mac.sh" "$@"
