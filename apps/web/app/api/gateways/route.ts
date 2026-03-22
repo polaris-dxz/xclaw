@@ -19,13 +19,63 @@ interface GatewayEntry {
   updated_at: number
 }
 
+function hasRuntimeGatewayOverride(): boolean {
+  return Boolean(
+    process.env.OPENCLAW_GATEWAY_PORT ||
+    process.env.OPENCLAW_CONFIG_PATH ||
+    process.env.OPENCLAW_STATE_DIR ||
+    process.env.XCLAW_OPENCLAW_CONFIG_PATH ||
+    process.env.XCLAW_OPENCLAW_HOME
+  )
+}
+
+function getRuntimePrimaryGatewayTarget(): { name: string; host: string; port: number; token: string } {
+  const defaultPort = 20064
+  return {
+    name: String(process.env.MC_DEFAULT_GATEWAY_NAME || 'primary'),
+    host: String(process.env.OPENCLAW_GATEWAY_HOST || '127.0.0.1'),
+    port: getDetectedGatewayPort() || parseInt(process.env.NEXT_PUBLIC_GATEWAY_PORT || String(defaultPort)),
+    token: getDetectedGatewayToken(),
+  }
+}
+
+function syncRuntimePrimaryGateway(
+  db: ReturnType<typeof getDatabase>,
+  gateways: GatewayEntry[],
+): GatewayEntry[] {
+  if (!hasRuntimeGatewayOverride()) return gateways
+
+  const target = getRuntimePrimaryGatewayTarget()
+  let targetGateway = gateways.find(g => g.host === target.host && Number(g.port) === target.port)
+  if (!targetGateway) {
+    targetGateway = gateways.find(g => g.name === target.name)
+  }
+
+  if (!targetGateway) {
+    db.prepare('UPDATE gateways SET is_primary = 0').run()
+    db.prepare(`
+      INSERT INTO gateways (name, host, port, token, is_primary) VALUES (?, ?, ?, ?, 1)
+    `).run(target.name, target.host, target.port, target.token)
+    return db.prepare('SELECT * FROM gateways ORDER BY is_primary DESC, name ASC').all() as GatewayEntry[]
+  }
+
+  db.prepare('UPDATE gateways SET is_primary = 0').run()
+  db.prepare(`
+    UPDATE gateways
+    SET name = ?, host = ?, port = ?, token = ?, is_primary = 1, updated_at = (unixepoch())
+    WHERE id = ?
+  `).run(target.name, target.host, target.port, target.token, targetGateway.id)
+
+  return db.prepare('SELECT * FROM gateways ORDER BY is_primary DESC, name ASC').all() as GatewayEntry[]
+}
+
 function ensureTable(db: ReturnType<typeof getDatabase>) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS gateways (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       host TEXT NOT NULL DEFAULT '127.0.0.1',
-      port INTEGER NOT NULL DEFAULT 18789,
+      port INTEGER NOT NULL DEFAULT 20064,
       token TEXT NOT NULL DEFAULT '',
       is_primary INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'unknown',
@@ -53,20 +103,18 @@ export async function GET(request: NextRequest) {
 
   // If no gateways exist, seed defaults from environment
   if (gateways.length === 0) {
-    const name = String(process.env.MC_DEFAULT_GATEWAY_NAME || 'primary')
-    const host = String(process.env.OPENCLAW_GATEWAY_HOST || '127.0.0.1')
-    const mainPort = getDetectedGatewayPort() || parseInt(process.env.NEXT_PUBLIC_GATEWAY_PORT || '18789')
-    const mainToken = getDetectedGatewayToken()
+    const target = getRuntimePrimaryGatewayTarget()
 
     db.prepare(`
       INSERT INTO gateways (name, host, port, token, is_primary) VALUES (?, ?, ?, ?, 1)
-    `).run(name, host, mainPort, mainToken)
+    `).run(target.name, target.host, target.port, target.token)
 
     const seeded = db.prepare('SELECT * FROM gateways ORDER BY is_primary DESC, name ASC').all() as GatewayEntry[]
     return NextResponse.json({ gateways: redactTokens(seeded) })
   }
 
-  return NextResponse.json({ gateways: redactTokens(gateways) })
+  const synced = syncRuntimePrimaryGateway(db, gateways)
+  return NextResponse.json({ gateways: redactTokens(synced) })
 }
 
 /**

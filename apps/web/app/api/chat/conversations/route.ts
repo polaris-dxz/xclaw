@@ -33,7 +33,15 @@ export async function GET(request: NextRequest) {
           COUNT(DISTINCT m.from_agent) + COUNT(DISTINCT CASE WHEN m.to_agent IS NOT NULL THEN m.to_agent END) as participant_count,
           SUM(CASE WHEN m.to_agent = ? AND m.read_at IS NULL THEN 1 ELSE 0 END) as unread_count
         FROM messages m
-        WHERE m.workspace_id = ? AND (m.from_agent = ? OR m.to_agent = ? OR m.to_agent IS NULL)
+        WHERE m.workspace_id = ?
+          AND m.conversation_id NOT LIKE 'draft-%'
+          AND (m.from_agent = ? OR m.to_agent = ? OR m.to_agent IS NULL)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM hidden_conversations h
+            WHERE h.workspace_id = m.workspace_id
+              AND h.conversation_id = m.conversation_id
+          )
         GROUP BY m.conversation_id
         ORDER BY last_message_at DESC
         LIMIT ? OFFSET ?
@@ -49,6 +57,13 @@ export async function GET(request: NextRequest) {
           0 as unread_count
         FROM messages m
         WHERE m.workspace_id = ?
+          AND m.conversation_id NOT LIKE 'draft-%'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM hidden_conversations h
+            WHERE h.workspace_id = m.workspace_id
+              AND h.conversation_id = m.conversation_id
+          )
         GROUP BY m.conversation_id
         ORDER BY last_message_at DESC
         LIMIT ? OFFSET ?
@@ -87,11 +102,30 @@ export async function GET(request: NextRequest) {
       countQuery = `
         SELECT COUNT(DISTINCT m.conversation_id) as total
         FROM messages m
-        WHERE m.workspace_id = ? AND (m.from_agent = ? OR m.to_agent = ? OR m.to_agent IS NULL)
+        WHERE m.workspace_id = ?
+          AND m.conversation_id NOT LIKE 'draft-%'
+          AND (m.from_agent = ? OR m.to_agent = ? OR m.to_agent IS NULL)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM hidden_conversations h
+            WHERE h.workspace_id = m.workspace_id
+              AND h.conversation_id = m.conversation_id
+          )
       `
       countParams.push(agent, agent)
     } else {
-      countQuery = 'SELECT COUNT(DISTINCT conversation_id) as total FROM messages WHERE workspace_id = ?'
+      countQuery = `
+        SELECT COUNT(DISTINCT m.conversation_id) as total
+        FROM messages m
+        WHERE m.workspace_id = ?
+          AND m.conversation_id NOT LIKE 'draft-%'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM hidden_conversations h
+            WHERE h.workspace_id = m.workspace_id
+              AND h.conversation_id = m.conversation_id
+          )
+      `
     }
     const countRow = db.prepare(countQuery).get(...countParams) as { total: number }
 
@@ -99,5 +133,50 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     logger.error({ err: error }, 'GET /api/chat/conversations error')
     return NextResponse.json({ error: 'Failed to fetch conversations' }, { status: 500 })
+  }
+}
+
+/**
+ * DELETE /api/chat/conversations - Remove a conversation and all messages
+ * Body: { conversation_id: string }
+ */
+export async function DELETE(request: NextRequest) {
+  // 与 GET 一致：viewer 即可从列表隐藏会话（否则仅 operator 能删，普通用户删了又会被 loadRemote 拉回）
+  const auth = requireRole(request, 'viewer')
+  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+
+  let body: any
+  try {
+    body = await request.json()
+  } catch {
+    return NextResponse.json({ error: 'Invalid request body' }, { status: 400 })
+  }
+
+  const conversationId = String(body?.conversation_id || '').trim()
+  if (!conversationId) {
+    return NextResponse.json({ error: 'conversation_id is required' }, { status: 400 })
+  }
+
+  try {
+    const db = getDatabase()
+    const workspaceId = auth.user.workspace_id ?? 1
+    db.prepare(`
+      INSERT INTO hidden_conversations (workspace_id, conversation_id, hidden_by)
+      VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id, conversation_id)
+      DO UPDATE SET hidden_at = unixepoch(), hidden_by = excluded.hidden_by
+    `).run(workspaceId, conversationId, auth.user.username || 'unknown')
+
+    const result = db
+      .prepare('DELETE FROM messages WHERE conversation_id = ? AND workspace_id = ?')
+      .run(conversationId, workspaceId)
+
+    return NextResponse.json({
+      deleted: Number(result.changes || 0),
+      conversation_id: conversationId,
+    })
+  } catch (error) {
+    logger.error({ err: error }, 'DELETE /api/chat/conversations error')
+    return NextResponse.json({ error: 'Failed to delete conversation' }, { status: 500 })
   }
 }

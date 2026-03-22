@@ -1,3 +1,5 @@
+import { Buffer } from 'node:buffer'
+import mammoth from 'mammoth'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, db_helpers, Message } from '@/lib/db'
 import { runOpenClaw } from '@/lib/command'
@@ -8,6 +10,7 @@ import { logger } from '@/lib/logger'
 import { scanForInjection, sanitizeForPrompt } from '@/lib/injection-guard'
 import { callOpenClawGateway } from '@/lib/openclaw-gateway'
 import { resolveCoordinatorDeliveryTarget } from '@/lib/coordinator-routing'
+import { readLatestAssistantReplyFromHistory } from '@/lib/openclaw-chat-history'
 
 type ForwardInfo = {
   attempted: boolean
@@ -15,6 +18,8 @@ type ForwardInfo = {
   reason?: string
   session?: string
   runId?: string
+  /** 服务端已完成本轮同步等待（agent.wait 等），客户端不应再进入「等待回复」竞态 */
+  completed?: boolean
 }
 
 type ToolEvent = {
@@ -28,6 +33,7 @@ type ChatAttachmentInput = {
   name?: string
   type?: string
   dataUrl?: string
+  size?: number
 }
 
 const COORDINATOR_AGENT =
@@ -47,24 +53,154 @@ function parseGatewayJson(raw: string): any | null {
   }
 }
 
-function toGatewayAttachments(value: unknown): Array<{ type: 'image'; mimeType: string; fileName?: string; content: string }> | undefined {
+/** OpenClaw chat.send：图片用 image，其它二进制用 file（网关侧多模态/解析） */
+type GatewayAttachmentPart =
+  | { type: 'image'; mimeType: string; fileName?: string; content: string }
+  | { type: 'file'; mimeType: string; fileName?: string; content: string }
+
+/** 解析 data URL（兼容 `data:image/png;charset=utf-8;base64,...`） */
+function parseDataUrlBase64(dataUrl: string): { mimeType: string; base64: string } | null {
+  if (!dataUrl.startsWith('data:')) return null
+  const marker = ';base64,'
+  const idx = dataUrl.indexOf(marker)
+  if (idx < 0) return null
+  const header = dataUrl.slice('data:'.length, idx)
+  const base64 = dataUrl.slice(idx + marker.length)
+  if (!header || !base64) return null
+  const mimeType = header.split(';')[0].trim() || 'application/octet-stream'
+  return { mimeType, base64 }
+}
+
+/** 文本类附件会内联进 message；发往网关时可不再重复传 file，减轻体积并避免 OpenClaw 未消费 file 附件 */
+function isTextLikeMime(mimeType: string): boolean {
+  const m = mimeType.toLowerCase().split(';')[0].trim()
+  if (m.startsWith('text/')) return true
+  if (m === 'application/json' || m === 'application/javascript') return true
+  if (m.endsWith('+json') || m.endsWith('+xml')) return true
+  return false
+}
+
+const MAX_INLINE_TEXT_CHARS = 200_000
+
+/** Word：服务端提取正文后不再把整份 base64 塞进 `openclaw gateway call --params`（避免 ARG_MAX 导致投递失败） */
+const WORD_DOC_MIMES = new Set([
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/msword',
+])
+
+/**
+ * 从 Word 文档提取纯文本并拼入 gateway 消息；成功提取的文件名加入 excluded，后续不再作为 file 附件转发。
+ */
+async function appendDocxTextFromAttachments(
+  base: string,
+  attachments: Array<{ name: string; type: string; dataUrl: string }> | undefined,
+): Promise<{ message: string; excludedFileNames: Set<string> }> {
+  const excludedFileNames = new Set<string>()
+  if (!attachments?.length) return { message: base, excludedFileNames }
+
+  const chunks: string[] = []
+  for (const att of attachments) {
+    const mime = (att.type || '').toLowerCase().split(';')[0].trim()
+    if (!WORD_DOC_MIMES.has(mime)) continue
+    const parsed = parseDataUrlBase64(att.dataUrl)
+    if (!parsed) continue
+    try {
+      const buf = Buffer.from(parsed.base64, 'base64')
+      const result = await mammoth.extractRawText({ buffer: buf })
+      let text = (result.value || '').trim()
+      if (!text) {
+        logger.warn({ name: att.name }, 'Word 附件无法提取正文（空内容），仍将尝试原样转发')
+        continue
+      }
+      if (text.length > MAX_INLINE_TEXT_CHARS) {
+        text = `${text.slice(0, MAX_INLINE_TEXT_CHARS)}\n\n[... 内容已截断 ...]`
+      }
+      chunks.push(`\n\n---\n【Word「${att.name}」提取正文】\n${text}`)
+      excludedFileNames.add(att.name)
+    } catch (err) {
+      logger.warn({ err, name: att.name }, 'Word 附件正文提取失败，仍将尝试原样转发')
+    }
+  }
+  if (chunks.length === 0) return { message: base, excludedFileNames }
+  return { message: `${base}${chunks.join('')}`, excludedFileNames }
+}
+
+/**
+ * 将 text/markdown、json 等解码进用户消息，模型侧一定能读到（不依赖网关 multimodal）。
+ */
+function appendInlinedTextFromAttachments(
+  base: string,
+  attachments: Array<{ name: string; type: string; dataUrl: string }> | undefined,
+): string {
+  if (!attachments?.length) return base
+  const chunks: string[] = []
+  for (const att of attachments) {
+    const parsed = parseDataUrlBase64(att.dataUrl)
+    if (!parsed) continue
+    const mime = (parsed.mimeType || att.type || '').toLowerCase()
+    if (!isTextLikeMime(mime)) continue
+    try {
+      let text = Buffer.from(parsed.base64, 'base64').toString('utf8')
+      if (text.length > MAX_INLINE_TEXT_CHARS) {
+        text = `${text.slice(0, MAX_INLINE_TEXT_CHARS)}\n\n[... 内容已截断 ...]`
+      }
+      chunks.push(`\n\n---\n【附件「${att.name}」】\n${text}`)
+    } catch {
+      continue
+    }
+  }
+  if (chunks.length === 0) return base
+  return `${base}${chunks.join('')}`
+}
+
+function toGatewayAttachments(
+  value: unknown,
+  opts?: { excludeTextLike?: boolean; excludeFileNames?: Set<string> },
+): GatewayAttachmentPart[] | undefined {
   if (!Array.isArray(value)) return undefined
 
-  const attachments = value.flatMap((entry) => {
+  const out: GatewayAttachmentPart[] = []
+  for (const entry of value) {
     const file = entry as ChatAttachmentInput
-    if (!file || typeof file !== 'object' || typeof file.dataUrl !== 'string') return []
-    const match = /^data:([^;]+);base64,(.+)$/.exec(file.dataUrl)
-    if (!match) return []
-    if (!match[1].startsWith('image/')) return []
-    return [{
-      type: 'image' as const,
-      mimeType: match[1],
+    if (!file || typeof file !== 'object' || typeof file.dataUrl !== 'string') continue
+    const fileName = typeof file.name === 'string' ? file.name : ''
+    if (fileName && opts?.excludeFileNames?.has(fileName)) continue
+    const parsed = parseDataUrlBase64(file.dataUrl)
+    if (!parsed) continue
+    const { mimeType, base64: content } = parsed
+    if (opts?.excludeTextLike && isTextLikeMime(mimeType)) continue
+    const base = {
+      mimeType,
       fileName: typeof file.name === 'string' ? file.name : undefined,
-      content: match[2],
-    }]
-  })
+      content,
+    }
+    if (mimeType.startsWith('image/')) {
+      out.push({ type: 'image', ...base })
+    } else {
+      out.push({ type: 'file', ...base })
+    }
+  }
 
-  return attachments.length > 0 ? attachments : undefined
+  return out.length > 0 ? out : undefined
+}
+
+/** 用户未输入正文、仅附件时，发给网关的提示（避免 message 为空） */
+const GATEWAY_ATTACHMENT_ONLY_HINT = '（用户上传了附件，请根据附件内容处理。）'
+
+function normalizeMessageAttachments(value: unknown): Array<{ name: string; type: string; size: number; dataUrl: string }> | undefined {
+  if (!Array.isArray(value)) return undefined
+  const cleaned = value
+    .slice(0, 8)
+    .flatMap((entry) => {
+      const file = entry as ChatAttachmentInput
+      if (!file || typeof file !== 'object' || typeof file.dataUrl !== 'string') return []
+      if (!file.dataUrl.startsWith('data:')) return []
+      const name = typeof file.name === 'string' && file.name.trim() ? file.name.trim().slice(0, 120) : 'attachment'
+      const type = typeof file.type === 'string' && file.type.trim() ? file.type.trim().slice(0, 120) : 'application/octet-stream'
+      const size = Number(file.size || 0)
+      return [{ name, type, size: Number.isFinite(size) && size >= 0 ? size : 0, dataUrl: file.dataUrl }]
+    })
+  return cleaned.length > 0 ? cleaned : undefined
 }
 
 function safeParseMetadata(raw: string | null | undefined): any | null {
@@ -109,6 +245,13 @@ function createChatReply(
     ...row,
     metadata: safeParseMetadata(row.metadata),
   })
+}
+
+function withPhase(
+  phase: 'thinking' | 'final' | 'error',
+  meta: Record<string, any> | null = null
+): Record<string, any> {
+  return { ...(meta || {}), phase }
 }
 
 function extractReplyText(waitPayload: any): string | null {
@@ -286,10 +429,15 @@ export async function GET(request: NextRequest) {
 
     const messages = db.prepare(query).all(...params) as Message[]
 
-    const parsed = messages.map((msg) => ({
-      ...msg,
-      metadata: safeParseMetadata(msg.metadata),
-    }))
+    const parsed = messages.map((msg) => {
+      const metadata = safeParseMetadata(msg.metadata) || {}
+      const attachments = Array.isArray((metadata as any).attachments) ? (metadata as any).attachments : undefined
+      return {
+        ...msg,
+        metadata,
+        attachments,
+      }
+    })
 
     // Get total count for pagination
     let countQuery = 'SELECT COUNT(*) as total FROM messages WHERE workspace_id = ?'
@@ -339,21 +487,43 @@ export async function POST(request: NextRequest) {
       ? COORDINATOR_AGENT
       : (auth.user.display_name || auth.user.username || 'system')
     const to = body.to ? (body.to as string).trim() : null
-    const content = (body.content || '').trim()
+    const userText = (body.content || '').trim()
+    const selectedModel = typeof body.model === 'string' ? body.model.trim().slice(0, 120) : ''
     const message_type = body.message_type || 'text'
     const conversation_id = body.conversation_id || `conv_${Date.now()}`
-    const metadata = body.metadata || null
+    const attachments = normalizeMessageAttachments(body.attachments)
+    /** 存库与展示：无正文时用语义化占位，便于列表与通知 */
+    const storedContent =
+      userText ||
+      (attachments
+        ? `[附件] ${attachments.map((a) => a.name).join('，')}`
+        : '')
+    /** 发给 OpenClaw 的用户消息正文：无正文且仅有附件时用固定提示；文本类附件内联进正文 */
+    let gatewayMessage = userText || (attachments ? GATEWAY_ATTACHMENT_ONLY_HINT : '')
+    gatewayMessage = appendInlinedTextFromAttachments(gatewayMessage, attachments)
+    const docxInline = await appendDocxTextFromAttachments(gatewayMessage, attachments)
+    gatewayMessage = docxInline.message
+    const docxExcludedNames = docxInline.excludedFileNames
+    const agentWaitInnerMs = attachments?.length ? 120_000 : 9_000
+    const agentWaitCliMs = agentWaitInnerMs + 15_000
+    const chatSendTimeoutMs = attachments?.length ? 120_000 : 12_000
+    const metadata = {
+      ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+      ...(selectedModel ? { selectedModel } : {}),
+      ...(attachments ? { attachments } : {}),
+      senderType: 'user',
+    }
 
-    if (!content) {
+    if (!userText && !attachments) {
       return NextResponse.json(
-        { error: '"content" is required' },
+        { error: '需要正文或至少一个附件' },
         { status: 400 }
       )
     }
 
-    // Scan content for injection when it will be forwarded to an agent
-    if (body.forward && to) {
-      const injectionReport = scanForInjection(content, { context: 'prompt' })
+    // Scan user text for injection when it will be forwarded to an agent（纯附件无正文则跳过）
+    if (body.forward && to && userText) {
+      const injectionReport = scanForInjection(userText, { context: 'prompt' })
       if (!injectionReport.safe) {
         const criticals = injectionReport.matches.filter(m => m.severity === 'critical')
         if (criticals.length > 0) {
@@ -375,9 +545,9 @@ export async function POST(request: NextRequest) {
       conversation_id,
       from,
       to,
-      content,
+      storedContent,
       message_type,
-      metadata ? JSON.stringify(metadata) : null,
+      Object.keys(metadata).length > 0 ? JSON.stringify(metadata) : null,
       workspaceId
     )
 
@@ -402,7 +572,7 @@ export async function POST(request: NextRequest) {
         to,
         'chat_message',
         `Message from ${from}`,
-        content.substring(0, 200) + (content.length > 200 ? '...' : ''),
+        storedContent.substring(0, 200) + (storedContent.length > 200 ? '...' : ''),
         'message',
         messageId,
         workspaceId
@@ -416,9 +586,14 @@ export async function POST(request: NextRequest) {
           .prepare('SELECT * FROM agents WHERE lower(name) = lower(?) AND workspace_id = ?')
           .get(to, workspaceId) as any
 
-        const explicitSessionKey = typeof body.sessionKey === 'string' && body.sessionKey
-          ? body.sessionKey
-          : null
+        const gwSessionFromConversation =
+          typeof conversation_id === 'string' && conversation_id.startsWith('gw:')
+            ? conversation_id.slice(3).trim() || null
+            : null
+        const explicitSessionKey =
+          (typeof body.sessionKey === 'string' && body.sessionKey.trim()
+            ? body.sessionKey.trim()
+            : gwSessionFromConversation) || null
         const sessions = getAllGatewaySessions()
         const isCoordinatorSend = String(to).toLowerCase() === COORDINATOR_AGENT.toLowerCase()
         const allAgents = isCoordinatorSend
@@ -479,7 +654,7 @@ export async function POST(request: NextRequest) {
                   from,
                   'I received your message, but my live coordinator session is offline right now. Start/restore the coordinator session and retry.',
                   'status',
-                  { status: 'offline', reason: 'no_active_session' }
+                  withPhase('error', { status: 'offline', reason: 'no_active_session' })
                 )
             } catch (e) {
               logger.error({ err: e }, 'Failed to create offline status reply')
@@ -488,18 +663,22 @@ export async function POST(request: NextRequest) {
         } else {
           try {
             const idempotencyKey = `mc-${messageId}-${Date.now()}`
+            const gatewayAttachments = toGatewayAttachments(attachments ?? body.attachments, {
+              excludeTextLike: true,
+              excludeFileNames: docxExcludedNames,
+            })
 
             if (sessionKey) {
               const acceptedPayload = await callOpenClawGateway<any>(
                 'chat.send',
                 {
                   sessionKey,
-                  message: content,
+                  message: gatewayMessage,
                   idempotencyKey,
                   deliver: false,
-                  attachments: toGatewayAttachments(body.attachments),
+                  ...(gatewayAttachments ? { attachments: gatewayAttachments } : {}),
                 },
-                12000,
+                chatSendTimeoutMs,
               )
               const status = String(acceptedPayload?.status || '').toLowerCase()
               forwardInfo.delivered = status === 'started' || status === 'ok' || status === 'in_flight'
@@ -509,11 +688,14 @@ export async function POST(request: NextRequest) {
               }
             } else {
               const invokeParams: any = {
-                message: `Message from ${from}: ${content}`,
+                message: `Message from ${from}: ${gatewayMessage}`,
                 idempotencyKey,
                 deliver: false,
               }
               invokeParams.agentId = openclawAgentId
+              if (gatewayAttachments) {
+                invokeParams.attachments = gatewayAttachments
+              }
 
               const invokeResult = await runOpenClaw(
                 [
@@ -521,12 +703,12 @@ export async function POST(request: NextRequest) {
                   'call',
                   'agent',
                   '--timeout',
-                  '10000',
+                  String(agentWaitCliMs),
                   '--params',
                   JSON.stringify(invokeParams),
                   '--json',
                 ],
-                { timeoutMs: 12000 }
+                { timeoutMs: agentWaitCliMs + 5_000 }
               )
               const acceptedPayload = parseGatewayJson(invokeResult.stdout)
               forwardInfo.delivered = true
@@ -561,7 +743,7 @@ export async function POST(request: NextRequest) {
                     from,
                     'I received your message, but delivery to the live coordinator runtime failed. Please restart the coordinator/gateway session and retry.',
                     'status',
-                    { status: 'delivery_failed', reason: 'gateway_send_failed' }
+                    withPhase('error', { status: 'delivery_failed', reason: 'gateway_send_failed' })
                   )
                 } catch (e) {
                   logger.error({ err: e }, 'Failed to create gateway failure status reply')
@@ -585,7 +767,7 @@ export async function POST(request: NextRequest) {
                 from,
                 'Received. I am coordinating downstream agents now.',
                 'status',
-                { status: 'accepted', runId: forwardInfo.runId || null }
+                withPhase('thinking', { status: 'accepted', runId: forwardInfo.runId || null })
               )
             } catch (e) {
               logger.error({ err: e }, 'Failed to create accepted status reply')
@@ -600,12 +782,12 @@ export async function POST(request: NextRequest) {
                     'call',
                     'agent.wait',
                     '--timeout',
-                    '8000',
+                    String(agentWaitCliMs),
                     '--params',
-                    JSON.stringify({ runId: forwardInfo.runId, timeoutMs: 6000 }),
+                    JSON.stringify({ runId: forwardInfo.runId, timeoutMs: agentWaitInnerMs }),
                     '--json',
                   ],
-                  { timeoutMs: 9000 }
+                  { timeoutMs: agentWaitCliMs + 5_000 }
                 )
 
                 const waitPayload = parseGatewayJson(waitResult.stdout)
@@ -622,14 +804,14 @@ export async function POST(request: NextRequest) {
                       from,
                       evt.name,
                       'tool_call',
-                      {
+                      withPhase('thinking', {
                         event: 'tool_call',
                         toolName: evt.name,
                         input: evt.input || null,
                         output: evt.output || null,
                         status: evt.status || null,
                         runId: forwardInfo.runId || null,
-                      }
+                      })
                     )
                   }
                 }
@@ -647,7 +829,7 @@ export async function POST(request: NextRequest) {
                     from,
                     `I received your message, but execution failed: ${reason}`,
                     'status',
-                    { status: 'error', runId: forwardInfo.runId }
+                    withPhase('error', { status: 'error', runId: forwardInfo.runId })
                   )
                 } else if (waitStatus === 'timeout') {
                   createChatReply(
@@ -658,7 +840,7 @@ export async function POST(request: NextRequest) {
                     from,
                     'I received your message and I am still processing it. I will post results as soon as execution completes.',
                     'status',
-                    { status: 'processing', runId: forwardInfo.runId }
+                    withPhase('thinking', { status: 'processing', runId: forwardInfo.runId })
                   )
                 } else {
                   const replyText = extractReplyText(waitPayload)
@@ -671,7 +853,7 @@ export async function POST(request: NextRequest) {
                       from,
                       replyText,
                       'text',
-                      { status: waitStatus || 'completed', runId: forwardInfo.runId }
+                      withPhase('final', { status: waitStatus || 'completed', runId: forwardInfo.runId })
                     )
                   } else {
                     createChatReply(
@@ -682,7 +864,7 @@ export async function POST(request: NextRequest) {
                       from,
                       'Execution accepted and completed. No textual response payload was returned by the runtime.',
                       'status',
-                      { status: waitStatus || 'completed', runId: forwardInfo.runId }
+                      withPhase('final', { status: waitStatus || 'completed', runId: forwardInfo.runId })
                     )
                   }
                 }
@@ -703,7 +885,7 @@ export async function POST(request: NextRequest) {
                   from,
                   `I received your message, but I could not retrieve completion output yet: ${reason}`,
                   'status',
-                  { status: 'unknown', runId: forwardInfo.runId }
+                  withPhase('error', { status: 'unknown', runId: forwardInfo.runId })
                 )
               }
             }
@@ -712,6 +894,187 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // For standard conversations, emit immediate visible status feedback so
+    // the user sees "assistant is responding" even before full runtime output arrives.
+    if (
+      body.forward &&
+      to &&
+      typeof conversation_id === 'string' &&
+      !conversation_id.startsWith('coord:')
+    ) {
+      try {
+        if (forwardInfo?.delivered) {
+          createChatReply(
+            db,
+            workspaceId,
+            conversation_id,
+            String(to),
+            from,
+            '已收到，正在处理你的消息...',
+            'status',
+            withPhase('thinking', {
+              status: 'accepted',
+              runId: forwardInfo.runId || null,
+              sessionKey: forwardInfo.session || undefined,
+            })
+          )
+        } else {
+          const reason = forwardInfo?.reason || 'unknown'
+          createChatReply(
+            db,
+            workspaceId,
+            conversation_id,
+            String(to),
+            from,
+            `消息已接收，但暂未投递成功：${reason}`,
+            'status',
+            withPhase('error', { status: 'delivery_failed', reason })
+          )
+        }
+      } catch (statusErr) {
+        logger.error({ err: statusErr }, 'Failed to create standard chat status reply')
+      }
+
+      // Best effort: for normal chats, also wait briefly for completion so the
+      // user can receive a real follow-up message instead of a stuck "accepted" state.
+      if (forwardInfo?.delivered && forwardInfo.runId) {
+        try {
+          const waitResult = await runOpenClaw(
+            [
+              'gateway',
+              'call',
+              'agent.wait',
+              '--timeout',
+              String(agentWaitCliMs),
+              '--params',
+              JSON.stringify({ runId: forwardInfo.runId, timeoutMs: agentWaitInnerMs }),
+              '--json',
+            ],
+            { timeoutMs: agentWaitCliMs + 5_000 }
+          )
+
+          const waitPayload = parseGatewayJson(waitResult.stdout)
+          const waitStatus = String(waitPayload?.status || '').toLowerCase()
+          const toolEvents = extractToolEvents(waitPayload)
+          const replyText = extractReplyText(waitPayload)
+
+          if (toolEvents.length > 0) {
+            for (const evt of toolEvents) {
+              createChatReply(
+                db,
+                workspaceId,
+                conversation_id,
+                String(to),
+                from,
+                evt.name,
+                'tool_call',
+                withPhase('thinking', {
+                  event: 'tool_call',
+                  toolName: evt.name,
+                  input: evt.input || null,
+                  output: evt.output || null,
+                  status: evt.status || null,
+                  runId: forwardInfo.runId || null,
+                })
+              )
+            }
+          }
+
+          if (waitStatus === 'error') {
+            const reason =
+              typeof waitPayload?.error === 'string'
+                ? waitPayload.error
+                : 'Unknown runtime error'
+            createChatReply(
+              db,
+              workspaceId,
+              conversation_id,
+              String(to),
+              from,
+              `执行失败：${reason}`,
+              'status',
+              withPhase('error', { status: 'error', runId: forwardInfo.runId })
+            )
+          } else if (waitStatus === 'timeout') {
+            createChatReply(
+              db,
+              workspaceId,
+              conversation_id,
+              String(to),
+              from,
+              '还在处理中，请稍候...',
+              'status',
+              withPhase('thinking', {
+                status: 'processing',
+                runId: forwardInfo.runId,
+                sessionKey: forwardInfo.session || undefined,
+              })
+            )
+          } else if (replyText) {
+            createChatReply(
+              db,
+              workspaceId,
+              conversation_id,
+              String(to),
+              from,
+              replyText,
+              'text',
+              withPhase('final', { status: waitStatus || 'completed', runId: forwardInfo.runId })
+            )
+          } else {
+            const historyReply = await readLatestAssistantReplyFromHistory(forwardInfo.session || null)
+            if (historyReply) {
+              createChatReply(
+                db,
+                workspaceId,
+                conversation_id,
+                String(to),
+                from,
+                historyReply,
+                'text',
+                withPhase('final', { status: waitStatus || 'completed', runId: forwardInfo.runId, source: 'chat.history' })
+              )
+            } else {
+              createChatReply(
+                db,
+                workspaceId,
+                conversation_id,
+                String(to),
+                from,
+                '已完成处理，但运行时没有返回可展示的文本内容。',
+                'status',
+                withPhase('final', { status: waitStatus || 'completed', runId: forwardInfo.runId })
+              )
+            }
+          }
+        } catch (waitErr) {
+          const maybeWaitStdout = String((waitErr as any)?.stdout || '')
+          const maybeWaitStderr = String((waitErr as any)?.stderr || '')
+          const waitPayload = parseGatewayJson(maybeWaitStdout)
+          const reason =
+            typeof waitPayload?.error === 'string'
+              ? waitPayload.error
+              : (maybeWaitStderr || maybeWaitStdout || '无法获取运行完成状态').trim()
+          createChatReply(
+            db,
+            workspaceId,
+            conversation_id,
+            String(to),
+            from,
+            `消息已投递，但暂时无法读取结果：${reason}`,
+            'status',
+            withPhase('error', { status: 'unknown', runId: forwardInfo.runId })
+          )
+        }
+      }
+    }
+
+    if (forwardInfo) {
+      forwardInfo.completed = true
+    }
+
+    /** 首条消息的 session.label 由客户端在发消息前 PATCH /api/chat/sessions 与侧栏标题同步写入，此处不再重复 sessions.patch */
+
     const created = db.prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?').get(messageId, workspaceId) as Message
     const parsedMessage = {
       ...created,
@@ -719,14 +1082,24 @@ export async function POST(request: NextRequest) {
         ...(safeParseMetadata(created.metadata) || {}),
         forwardInfo: forwardInfo || undefined,
       },
+      attachments,
     }
 
     // Broadcast to SSE clients
     eventBus.broadcast('chat.message', parsedMessage)
 
-    return NextResponse.json({ message: parsedMessage, forward: forwardInfo }, { status: 201 })
+    return NextResponse.json(
+      {
+        message: parsedMessage,
+        forward: forwardInfo,
+      },
+      { status: 201 },
+    )
   } catch (error) {
     logger.error({ err: error }, 'POST /api/chat/messages error')
     return NextResponse.json({ error: 'Failed to send message' }, { status: 500 })
   }
 }
+
+/** 大体积 base64 附件需在 Node 运行时处理；避免 Edge 默认限制 */
+export const runtime = 'nodejs'

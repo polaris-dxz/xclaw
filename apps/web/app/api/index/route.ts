@@ -44,7 +44,7 @@ const endpoints: Endpoint[] = [
 
   // ── Chat ──────────────────────────────────────────
   { path: '/api/chat/messages', methods: ['GET', 'POST'], description: 'Chat messages — list, send', tag: 'Chat', auth: 'viewer/operator' },
-  { path: '/api/chat/messages/:id', methods: ['PATCH'], description: 'Mark chat message read', tag: 'Chat', auth: 'operator' },
+  { path: '/api/chat/messages/:id', methods: ['PATCH'], description: 'Mark chat message read; update metadata (feedback)', tag: 'Chat', auth: 'operator' },
   { path: '/api/chat/conversations', methods: ['GET'], description: 'List conversations', tag: 'Chat', auth: 'viewer' },
   { path: '/api/chat/session-prefs', methods: ['GET', 'PATCH'], description: 'Local session chat preferences (rename + color)', tag: 'Chat', auth: 'viewer/operator' },
 

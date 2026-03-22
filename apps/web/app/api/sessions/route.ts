@@ -11,6 +11,23 @@ import { logger } from '@/lib/logger'
 
 const LOCAL_SESSION_ACTIVE_WINDOW_MS = 90 * 60 * 1000
 
+function shouldIncludeLocalSessions(request: NextRequest): boolean {
+  const includeLocalQuery = String(request.nextUrl.searchParams.get('includeLocal') || '').trim().toLowerCase()
+  if (includeLocalQuery === '1' || includeLocalQuery === 'true') return true
+  if (includeLocalQuery === '0' || includeLocalQuery === 'false') return false
+
+  const includeLocalEnv = String(process.env.XCLAW_INCLUDE_LOCAL_SESSIONS || '').trim().toLowerCase()
+  if (includeLocalEnv === '1' || includeLocalEnv === 'true') return true
+  if (includeLocalEnv === '0' || includeLocalEnv === 'false') return false
+
+  // In embedded desktop mode, default to gateway-only sessions to avoid mixing
+  // unrelated local CLI history into the Session Workbench.
+  const stateDir = String(process.env.OPENCLAW_STATE_DIR || '').trim().toLowerCase()
+  if (stateDir.endsWith('/.xclaw')) return false
+
+  return true
+}
+
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
@@ -18,13 +35,16 @@ export async function GET(request: NextRequest) {
   try {
     const gatewaySessions = getAllGatewaySessions()
     const mappedGatewaySessions = mapGatewaySessions(gatewaySessions)
+    const includeLocal = shouldIncludeLocalSessions(request)
 
-    // Always include local sessions alongside gateway sessions
-    await syncClaudeSessions()
-    const claudeSessions = getLocalClaudeSessions()
-    const codexSessions = getLocalCodexSessions()
-    const hermesSessions = getLocalHermesSessions()
-    const localMerged = mergeLocalSessions(claudeSessions, codexSessions, hermesSessions)
+    let localMerged: Array<Record<string, any>> = []
+    if (includeLocal) {
+      await syncClaudeSessions()
+      const claudeSessions = getLocalClaudeSessions()
+      const codexSessions = getLocalCodexSessions()
+      const hermesSessions = getLocalHermesSessions()
+      localMerged = mergeLocalSessions(claudeSessions, codexSessions, hermesSessions)
+    }
 
     if (mappedGatewaySessions.length === 0 && localMerged.length === 0) {
       return NextResponse.json({ sessions: [] })
@@ -142,7 +162,7 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid session key' }, { status: 400 })
     }
 
-    const result = await callOpenClawGateway('session_delete', { sessionKey }, 10_000)
+    const result = await callOpenClawGateway('sessions.delete', { key: sessionKey }, 10_000)
 
     db_helpers.logActivity(
       'session_control',

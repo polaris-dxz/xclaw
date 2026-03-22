@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
  * Admin-only. Downloads, validates, security-scans, and writes to disk.
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const limited = heavyLimiter(request)

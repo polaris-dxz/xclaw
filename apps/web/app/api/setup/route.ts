@@ -5,6 +5,9 @@ import { logAuditEvent } from '@/lib/db'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { logger } from '@/lib/logger'
 
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 const INSECURE_PASSWORDS = new Set([
   'admin',
   'password',
@@ -14,7 +17,10 @@ const INSECURE_PASSWORDS = new Set([
 ])
 
 export async function GET() {
-  return NextResponse.json({ needsSetup: needsFirstTimeSetup() })
+  return NextResponse.json(
+    { needsSetup: needsFirstTimeSetup() },
+    { headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' } },
+  )
 }
 
 export async function POST(request: Request) {

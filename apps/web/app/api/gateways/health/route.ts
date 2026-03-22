@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { requireRole } from "@/lib/auth"
 import { getDatabase } from "@/lib/db"
+import { getDetectedGatewayToken } from "@/lib/gateway-runtime"
 
 function ensureGatewaysTable(db: ReturnType<typeof getDatabase>) {
   db.exec(`
@@ -8,7 +9,7 @@ function ensureGatewaysTable(db: ReturnType<typeof getDatabase>) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       host TEXT NOT NULL DEFAULT '127.0.0.1',
-      port INTEGER NOT NULL DEFAULT 18789,
+      port INTEGER NOT NULL DEFAULT 20064,
       token TEXT NOT NULL DEFAULT '',
       is_primary INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'unknown',
@@ -126,9 +127,11 @@ function isBlockedUrl(urlStr: string, userConfiguredHosts: Set<string>): boolean
   }
 }
 
-function buildGatewayProbeUrl(host: string, port: number): string | null {
+function buildGatewayProbeUrls(host: string, port: number): string[] {
   const rawHost = String(host || '').trim()
-  if (!rawHost) return null
+  if (!rawHost) return []
+
+  const probePaths = ['/api/health', '/health', '/api/config/schema']
 
   const hasProtocol =
     rawHost.startsWith('ws://') ||
@@ -144,15 +147,19 @@ function buildGatewayProbeUrl(host: string, port: number): string | null {
       if (!parsed.port && Number.isFinite(port) && port > 0) {
         parsed.port = String(port)
       }
-      parsed.pathname = parsed.pathname.replace(/\/+$/, '') + '/api/health'
-      return parsed.toString()
+      return probePaths.map((probePath) => {
+        const candidate = new URL(parsed.toString())
+        candidate.pathname = probePath
+        candidate.search = ''
+        return candidate.toString()
+      })
     } catch {
-      return null
+      return []
     }
   }
 
-  if (!Number.isFinite(port) || port <= 0) return null
-  return `http://${rawHost}:${port}/api/health`
+  if (!Number.isFinite(port) || port <= 0) return []
+  return probePaths.map((probePath) => `http://${rawHost}:${port}${probePath}`)
 }
 
 /**
@@ -191,15 +198,15 @@ export async function POST(request: NextRequest) {
 
   for (const gw of gateways) {
     const probedAt = Math.floor(Date.now() / 1000)
-    const probeUrl = buildGatewayProbeUrl(gw.host, gw.port)
-    if (!probeUrl) {
+    const probeUrls = buildGatewayProbeUrls(gw.host, gw.port)
+    if (probeUrls.length === 0) {
       const error = 'Invalid gateway address'
       insertLogStmt.run(gw.id, 'error', null, probedAt, error)
       results.push({ id: gw.id, name: gw.name, status: 'error', latency: null, agents: [], sessions_count: 0, error })
       continue
     }
 
-    if (isBlockedUrl(probeUrl, configuredHosts)) {
+    if (probeUrls.some((probeUrl) => isBlockedUrl(probeUrl, configuredHosts))) {
       const error = 'Blocked URL'
       insertLogStmt.run(gw.id, 'error', null, probedAt, error)
       results.push({ id: gw.id, name: gw.name, status: 'error', latency: null, agents: [], sessions_count: 0, error })
@@ -210,11 +217,25 @@ export async function POST(request: NextRequest) {
     try {
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), 5000)
+      const token = (gw.is_primary === 1 ? getDetectedGatewayToken() : String(gw.token || '').trim())
+      const headers: Record<string, string> = {}
+      if (token) headers.Authorization = `Bearer ${token}`
 
-      const res = await fetch(probeUrl, {
-        signal: controller.signal,
-      })
+      let res: Response | null = null
+      for (const probeUrl of probeUrls) {
+        const candidateRes = await fetch(probeUrl, {
+          signal: controller.signal,
+          headers,
+        })
+        if (candidateRes.ok) {
+          res = candidateRes
+          break
+        }
+        // Keep last response for diagnostics if all probe paths fail
+        res = candidateRes
+      }
       clearTimeout(timeout)
+      if (!res) throw new Error('health probe failed')
 
       const latency = Date.now() - start
       const status = res.ok ? "online" : "error"

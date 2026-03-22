@@ -3,7 +3,8 @@ import { existsSync } from 'node:fs'
 import { APP_VERSION } from '@/lib/version'
 
 const GITHUB_RELEASES_URL =
-  process.env.XCLAW_RELEASES_URL || 'https://api.github.com/repos/builderz-labs/xclaw/releases/latest'
+  process.env.XCLAW_RELEASES_URL ||
+  'https://api.github.com/repos/polaris-dxz/xclaw/releases/latest'
 
 /** Simple semver compare: returns 1 if a > b, -1 if a < b, 0 if equal. */
 function compareSemver(a: string, b: string): number {

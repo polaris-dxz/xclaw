@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createHash } from 'node:crypto'
 import { access, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { constants, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { requireRole } from '@/lib/auth'
@@ -16,6 +16,8 @@ interface SkillSummary {
   description?: string
   registry_slug?: string | null
   security_status?: string | null
+  /** Shipped with the app under openclaw-runtime/config/skills — not removable via API */
+  builtin?: boolean
 }
 
 type SkillRoot = { source: string; path: string }
@@ -37,18 +39,76 @@ async function pathReadable(path: string): Promise<boolean> {
   }
 }
 
+/** Strip YAML frontmatter; returns body after closing --- */
+function stripSkillFrontmatter(content: string): { yaml: string | null; body: string } {
+  const m = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/)
+  if (!m) return { yaml: null, body: content }
+  return { yaml: m[1], body: content.slice(m[0].length) }
+}
+
+/** Parse `description:` from SKILL.md YAML frontmatter (quoted / simple / block |). */
+function extractDescriptionFromYaml(yaml: string): string | undefined {
+  const dq = yaml.match(/^\s*description:\s*"((?:[^"\\]|\\.)*)"/m)
+  if (dq) {
+    const text = dq[1].replace(/\\"/g, '"').replace(/\\n/g, '\n')
+    return text.length > 220 ? `${text.slice(0, 217)}...` : text
+  }
+  const sq = yaml.match(/^\s*description:\s*'((?:[^'\\]|\\.)*)'/m)
+  if (sq) {
+    const text = sq[1].replace(/\\'/g, "'")
+    return text.length > 220 ? `${text.slice(0, 217)}...` : text
+  }
+  const blockPipe = yaml.match(/^\s*description:\s*\|\s*\r?\n((?:[ \t]+[^\r\n]+\r?\n)+)/m)
+  if (blockPipe) {
+    const text = blockPipe[1]
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^\s+/, '').trim())
+      .filter(Boolean)
+      .join(' ')
+    if (text) return text.length > 220 ? `${text.slice(0, 217)}...` : text
+  }
+  const oneLine = yaml.match(/^\s*description:\s*([^"'|>\n][^\n]*)$/m)
+  if (oneLine) {
+    const text = oneLine[1].trim()
+    if (text && text !== '---') return text.length > 220 ? `${text.slice(0, 217)}...` : text
+  }
+  return undefined
+}
+
+/** First readable line from markdown body (skip headings, hr, blockquote lead). */
+function extractDescriptionFromBody(body: string): string | undefined {
+  const lines = body.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0)
+  for (const line of lines) {
+    if (line.startsWith('#')) continue
+    if (line === '---' || line === '+++') continue
+    if (/^[-*_]{3,}$/.test(line)) continue
+    let text = line.startsWith('>') ? line.replace(/^>\s*/, '').trim() : line
+    if (!text) continue
+    return text.length > 220 ? `${text.slice(0, 217)}...` : text
+  }
+  return undefined
+}
+
 async function extractDescription(skillPath: string): Promise<string | undefined> {
   const skillDocPath = join(skillPath, 'SKILL.md')
   if (!(await pathReadable(skillDocPath))) return undefined
   try {
     const content = await readFile(skillDocPath, 'utf8')
-    const lines = content.split('\n').map((line) => line.trim()).filter(Boolean)
-    const firstParagraph = lines.find((line) => !line.startsWith('#'))
-    if (!firstParagraph) return undefined
-    return firstParagraph.length > 220 ? `${firstParagraph.slice(0, 217)}...` : firstParagraph
+    const { yaml, body } = stripSkillFrontmatter(content)
+    if (yaml) {
+      const fromYaml = extractDescriptionFromYaml(yaml)
+      if (fromYaml) return fromYaml
+    }
+    return extractDescriptionFromBody(body)
   } catch {
     return undefined
   }
+}
+
+function normalizeSkillDescription(description?: string | null): string | undefined {
+  const d = (description ?? '').trim()
+  if (!d || d === '---' || d === '+++') return undefined
+  return d
 }
 
 async function collectSkillsFromDir(baseDir: string, source: string): Promise<SkillSummary[]> {
@@ -75,6 +135,60 @@ async function collectSkillsFromDir(baseDir: string, source: string): Promise<Sk
   }
 }
 
+function resolveXclawBuiltinSkillsDir(): string {
+  const env = process.env.MC_SKILLS_XCLAW_BUILTIN_DIR?.trim()
+  if (env) return env
+  const cwd = process.cwd()
+  const candidates = [
+    join(cwd, '..', 'desktop', 'openclaw-runtime', 'config', 'skills'),
+    join(cwd, 'apps', 'desktop', 'openclaw-runtime', 'config', 'skills'),
+  ]
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) return p
+    } catch {
+      // ignore
+    }
+  }
+  return candidates[0]
+}
+
+function isBuiltinSource(source: string): boolean {
+  return source === 'xclaw-builtin'
+}
+
+function inferBuiltin(skill: Pick<SkillSummary, 'source' | 'path'>): boolean {
+  if (isBuiltinSource(skill.source)) return true
+  if (/openclaw-runtime[/\\]config[/\\]skills/i.test(skill.path)) return true
+  return false
+}
+
+function decorateSkill(skill: SkillSummary): SkillSummary {
+  return {
+    ...skill,
+    builtin: inferBuiltin(skill),
+    description: normalizeSkillDescription(skill.description),
+  }
+}
+
+function sortSkillsBuiltinFirst(skills: SkillSummary[]): SkillSummary[] {
+  return [...skills].sort((a, b) => {
+    const da = inferBuiltin(a) ? 0 : 1
+    const db = inferBuiltin(b) ? 0 : 1
+    if (da !== db) return da - db
+    return a.name.localeCompare(b.name)
+  })
+}
+
+function dedupeSkillsByName(skills: SkillSummary[]): SkillSummary[] {
+  const ordered = sortSkillsBuiltinFirst(skills)
+  const deduped = new Map<string, SkillSummary>()
+  for (const skill of ordered) {
+    if (!deduped.has(skill.name)) deduped.set(skill.name, decorateSkill(skill))
+  }
+  return Array.from(deduped.values()).sort((a, b) => a.name.localeCompare(b.name))
+}
+
 function getSkillRoots(): SkillRoot[] {
   const home = homedir()
   const cwd = process.cwd()
@@ -84,6 +198,7 @@ function getSkillRoots(): SkillRoot[] {
     { source: 'project-agents', path: resolveSkillRoot('MC_SKILLS_PROJECT_AGENTS_DIR', join(cwd, '.agents', 'skills')) },
     { source: 'project-codex', path: resolveSkillRoot('MC_SKILLS_PROJECT_CODEX_DIR', join(cwd, '.codex', 'skills')) },
   ]
+  roots.push({ source: 'xclaw-builtin', path: resolveXclawBuiltinSkillsDir() })
   // Add OpenClaw gateway skill roots when configured
   const openclawState = process.env.OPENCLAW_STATE_DIR || process.env.OPENCLAW_HOME || join(home, '.openclaw')
   const openclawSkills = resolveSkillRoot('MC_SKILLS_OPENCLAW_DIR', join(openclawState, 'skills'))
@@ -177,8 +292,10 @@ async function deleteSkill(root: SkillRoot, name: string) {
 }
 
 /**
- * Try to serve skill list from DB (fast path).
- * Falls back to filesystem scan if DB has no data yet.
+ * Load skill rows from SQLite for metadata (registry_slug, security_status, etc.).
+ * Listing always merges with a filesystem scan — DB alone is incomplete because
+ * xclaw-builtin is never synced into the DB by skill-sync, and sync may delete
+ * rows when paths diverge; pure DB responses would hide those disk skills.
  */
 function getSkillsFromDB(): SkillSummary[] | null {
   try {
@@ -187,8 +304,7 @@ function getSkillsFromDB(): SkillSummary[] | null {
     const rows = db.prepare('SELECT name, source, path, description, registry_slug, security_status FROM skills ORDER BY name').all() as Array<{
       name: string; source: string; path: string; description: string | null; registry_slug: string | null; security_status: string | null
     }>
-    if (rows.length === 0) return null // DB empty — fall back to fs scan
-    return rows.map(r => ({
+    return rows.map((r) => ({
       id: `${r.source}:${r.name}`,
       name: r.name,
       source: r.source,
@@ -200,6 +316,63 @@ function getSkillsFromDB(): SkillSummary[] | null {
   } catch {
     return null
   }
+}
+
+function skillKey(source: string, name: string): string {
+  return `${source}:${name}`
+}
+
+/** Overlay DB fields onto filesystem-discovered skills; append DB-only rows (e.g. transient mismatch). */
+function mergeFsSkillsWithDbMetadata(fsSkills: SkillSummary[], dbSkills: SkillSummary[] | null): SkillSummary[] {
+  if (!dbSkills || dbSkills.length === 0) return fsSkills
+  const dbByKey = new Map<string, SkillSummary>()
+  for (const s of dbSkills) {
+    dbByKey.set(skillKey(s.source, s.name), s)
+  }
+  const out: SkillSummary[] = []
+  const seen = new Set<string>()
+  for (const s of fsSkills) {
+    const key = skillKey(s.source, s.name)
+    seen.add(key)
+    const db = dbByKey.get(key)
+    if (!db) {
+      out.push(s)
+      continue
+    }
+    out.push({
+      ...s,
+      path: s.path || db.path,
+      description: s.description ?? db.description ?? undefined,
+      registry_slug: db.registry_slug ?? s.registry_slug,
+      security_status: db.security_status ?? s.security_status,
+    })
+  }
+  for (const s of dbSkills) {
+    const key = skillKey(s.source, s.name)
+    if (!seen.has(key)) out.push(s)
+  }
+  return out
+}
+
+function buildSkillGroups(
+  roots: SkillRoot[],
+  merged: SkillSummary[],
+): Array<{ source: string; path: string; skills: SkillSummary[] }> {
+  const groupMap = new Map<string, { source: string; path: string; skills: SkillSummary[] }>()
+  for (const root of roots) {
+    groupMap.set(root.source, { source: root.source, path: root.path, skills: [] })
+  }
+  for (const skill of merged) {
+    if (!groupMap.has(skill.source) && skill.source.startsWith('workspace-')) {
+      groupMap.set(skill.source, { source: skill.source, path: '', skills: [] })
+    }
+    const group = groupMap.get(skill.source)
+    if (group) group.skills.push(skill)
+  }
+  return Array.from(groupMap.values()).map((g) => ({
+    ...g,
+    skills: g.skills.map(decorateSkill),
+  }))
 }
 
 export async function GET(request: NextRequest) {
@@ -266,36 +439,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ source, name, security })
   }
 
-  // Try DB-backed fast path first
-  const dbSkills = getSkillsFromDB()
-  if (dbSkills) {
-    // Group by source for the groups response
-    const groupMap = new Map<string, { source: string; path: string; skills: SkillSummary[] }>()
-    for (const root of roots) {
-      groupMap.set(root.source, { source: root.source, path: root.path, skills: [] })
-    }
-    for (const skill of dbSkills) {
-      // Dynamically add workspace-* groups not already in roots
-      if (!groupMap.has(skill.source) && skill.source.startsWith('workspace-')) {
-        groupMap.set(skill.source, { source: skill.source, path: '', skills: [] })
-      }
-      const group = groupMap.get(skill.source)
-      if (group) group.skills.push(skill)
-    }
-
-    const deduped = new Map<string, SkillSummary>()
-    for (const skill of dbSkills) {
-      if (!deduped.has(skill.name)) deduped.set(skill.name, skill)
-    }
-
-    return NextResponse.json({
-      skills: Array.from(deduped.values()).sort((a, b) => a.name.localeCompare(b.name)),
-      groups: Array.from(groupMap.values()),
-      total: deduped.size,
-    })
-  }
-
-  // Fallback: filesystem scan (first load before sync runs)
+  // Always scan the filesystem (source of truth for what exists on disk), then merge DB metadata.
   const bySource = await Promise.all(
     roots.map(async (root) => ({
       source: root.source,
@@ -304,16 +448,15 @@ export async function GET(request: NextRequest) {
     }))
   )
 
-  const all = bySource.flatMap((group) => group.skills)
-  const deduped = new Map<string, SkillSummary>()
-  for (const skill of all) {
-    if (!deduped.has(skill.name)) deduped.set(skill.name, skill)
-  }
+  const allFromFs = bySource.flatMap((group) => group.skills)
+  const dbSkills = getSkillsFromDB()
+  const merged = mergeFsSkillsWithDbMetadata(allFromFs, dbSkills)
+  const list = dedupeSkillsByName(merged)
 
   return NextResponse.json({
-    skills: Array.from(deduped.values()).sort((a, b) => a.name.localeCompare(b.name)),
-    groups: bySource,
-    total: deduped.size,
+    skills: list,
+    groups: buildSkillGroups(roots, merged),
+    total: list.length,
   })
 }
 
@@ -330,6 +473,9 @@ export async function POST(request: NextRequest) {
 
   if (!root || !name) {
     return NextResponse.json({ error: 'Valid source and name are required' }, { status: 400 })
+  }
+  if (isBuiltinSource(root.source)) {
+    return NextResponse.json({ error: '内置技能不可修改或覆盖' }, { status: 403 })
   }
 
   await mkdir(root.path, { recursive: true })
@@ -350,6 +496,9 @@ export async function PUT(request: NextRequest) {
   if (!root || !name || content == null) {
     return NextResponse.json({ error: 'Valid source, name, and content are required' }, { status: 400 })
   }
+  if (isBuiltinSource(root.source)) {
+    return NextResponse.json({ error: '内置技能不可修改' }, { status: 403 })
+  }
 
   await mkdir(root.path, { recursive: true })
   const { skillPath, skillDocPath } = await upsertSkill(root, name, content)
@@ -366,6 +515,9 @@ export async function DELETE(request: NextRequest) {
   const name = normalizeSkillName(String(searchParams.get('name') || ''))
   if (!root || !name) {
     return NextResponse.json({ error: 'Valid source and name are required' }, { status: 400 })
+  }
+  if (isBuiltinSource(root.source)) {
+    return NextResponse.json({ error: '内置技能不可移除' }, { status: 403 })
   }
 
   const { skillPath } = await deleteSkill(root, name)

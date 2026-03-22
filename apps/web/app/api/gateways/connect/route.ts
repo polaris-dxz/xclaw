@@ -94,7 +94,7 @@ function ensureTable(db: ReturnType<typeof getDatabase>) {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       host TEXT NOT NULL DEFAULT '127.0.0.1',
-      port INTEGER NOT NULL DEFAULT 18789,
+      port INTEGER NOT NULL DEFAULT 20064,
       token TEXT NOT NULL DEFAULT '',
       is_primary INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'unknown',

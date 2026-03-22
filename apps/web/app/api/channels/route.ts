@@ -4,6 +4,8 @@ import { config } from '@/lib/config'
 import { logger } from '@/lib/logger'
 import { getDetectedGatewayToken } from '@/lib/gateway-runtime'
 import { callOpenClawGateway } from '@/lib/openclaw-gateway'
+import { createDiskHintChannelStatus, readRemoteChannelDiskHints } from '@/lib/remote-channel-disk-hints'
+import { parseJsonFromCliStdout } from '@/lib/strip-ansi-codes'
 
 const gatewayInternalUrl = `http://${config.gatewayHost}:${config.gatewayPort}`
 
@@ -76,6 +78,24 @@ interface ChannelsSnapshot {
   updatedAt?: number
 }
 
+/** Overlay 远控通道 configured=true from local openclaw.json when gateway is offline or lagging. */
+function mergeDiskChannelHints(snapshot: ChannelsSnapshot): ChannelsSnapshot {
+  const hints = readRemoteChannelDiskHints()
+  for (const [key, ok] of Object.entries(hints)) {
+    if (!ok) continue
+    const prev = snapshot.channels[key]
+    if (!prev) {
+      snapshot.channels[key] = createDiskHintChannelStatus() as ChannelStatus
+    } else {
+      snapshot.channels[key] = { ...prev, configured: Boolean(prev.configured) || true }
+    }
+  }
+  if (snapshot.channelOrder.length === 0 && Object.keys(snapshot.channels).length > 0) {
+    snapshot.channelOrder = Object.keys(snapshot.channels)
+  }
+  return snapshot
+}
+
 function transformGatewayChannels(data: GatewayData): ChannelsSnapshot {
   const parsed = asRecord(data)
   const rawChannels = asRecord(parsed?.channels) ?? {}
@@ -136,14 +156,14 @@ function transformGatewayChannels(data: GatewayData): ChannelsSnapshot {
     })
   }
 
-  return {
+  return mergeDiskChannelHints({
     channels,
     channelAccounts,
     channelOrder: order,
     channelLabels: labels,
     connected: true,
     updatedAt: readNumber(parsed?.ts),
-  }
+  })
 }
 
 async function loadChannelsViaRpc(probe = false): Promise<ChannelsSnapshot> {
@@ -175,10 +195,25 @@ async function loadChannelsViaCli(probe = false): Promise<ChannelsSnapshot> {
   const { runOpenClaw } = await import('@/lib/command')
   const args = ['channels', 'status', '--json', '--timeout', '5000']
   if (probe) args.push('--probe')
-  const { stdout } = await runOpenClaw(args, { timeoutMs: probe ? 20000 : 15000 })
-  return {
-    ...transformGatewayChannels(JSON.parse(stdout)),
-    connected: true,
+  try {
+    const { stdout, stderr } = await runOpenClaw(args, {
+      timeoutMs: probe ? 20000 : 15000,
+      env: { NO_COLOR: '1', FORCE_COLOR: '0', CI: '1' },
+    })
+    const data = parseJsonFromCliStdout(stdout, stderr) as GatewayData
+    return {
+      ...transformGatewayChannels(data),
+      connected: true,
+    }
+  } catch {
+    const reachable = await isGatewayReachable()
+    return mergeDiskChannelHints({
+      channels: {},
+      channelAccounts: {},
+      channelOrder: [],
+      channelLabels: {},
+      connected: reachable,
+    })
   }
 }
 
@@ -275,13 +310,15 @@ export async function GET(request: NextRequest) {
     } catch (cliErr) {
       logger.warn({ err, cliErr }, 'Gateway unreachable for channel status')
       const reachable = await isGatewayReachable()
-      return NextResponse.json({
-        channels: {},
-        channelAccounts: {},
-        channelOrder: [],
-        channelLabels: {},
-        connected: reachable,
-      } satisfies ChannelsSnapshot)
+      return NextResponse.json(
+        mergeDiskChannelHints({
+          channels: {},
+          channelAccounts: {},
+          channelOrder: [],
+          channelLabels: {},
+          connected: reachable,
+        }),
+      )
     }
   }
 }

@@ -199,14 +199,14 @@ describe('buildGatewayProbeUrl', () => {
   })
 
   it('appends port to URL without port when port is provided', () => {
-    const result = buildGatewayProbeUrl('https://gateway.example.com', 18789)
-    expect(result).toContain('18789')
+    const result = buildGatewayProbeUrl('https://gateway.example.com', 20064)
+    expect(result).toContain('20064')
   })
 
   it('does not overwrite existing port in URL', () => {
-    const result = buildGatewayProbeUrl('https://gateway.example.com:9000', 18789)
+    const result = buildGatewayProbeUrl('https://gateway.example.com:9000', 20064)
     expect(result).toContain('9000')
-    expect(result).not.toContain('18789')
+    expect(result).not.toContain('20064')
   })
 
   it('returns null for empty host', () => {
