@@ -62,6 +62,10 @@ function resolveEmbeddedOpenClawPaths() {
   return {
     runtimeRoot,
     stateDir,
+    /**
+     * 内置插件目录的「落地副本」路径（真实文件，非软链）。OpenClaw 对 manifest 使用 rejectHardlinks，
+     */
+    embeddedBundledExtensionsDir: path.join(stateDir, 'extensions'),
     configPath: path.join(stateDir, 'openclaw.json'),
     metadataPath: path.join(stateDir, 'xclaw.json'),
     workspaceDir: path.join(stateDir, 'workspace'),
@@ -101,6 +105,141 @@ function normalizeStringArray(values) {
     result.push(value)
   }
   return result
+}
+
+function tryRealpathSync(dirPath) {
+  try {
+    return fs.realpathSync(dirPath)
+  } catch {
+    return dirPath
+  }
+}
+
+/**
+ * 把应用内 config/extensions 复制到 ~/.xclaw/extensions（dereference: 跟随软链拷贝内容）。
+ * 仅顶层目录软链无法通过 OpenClaw 的 manifest 安全校验（子路径仍会解析到 ~/.openclaw/extensions/...）。
+ */
+function ensureEmbeddedExtensionsCopy(paths) {
+  const dest = paths.embeddedBundledExtensionsDir
+  if (!fs.existsSync(paths.runtimeExtensionsDir)) {
+    return null
+  }
+  let srcResolved = paths.runtimeExtensionsDir
+  try {
+    srcResolved = fs.realpathSync(paths.runtimeExtensionsDir)
+  } catch {
+    /* */
+  }
+  try {
+    let srcStat
+    try {
+      srcStat = fs.statSync(srcResolved)
+    } catch {
+      return null
+    }
+    const stampPath = path.join(paths.stateDir, '.openclaw-bundled-extensions.stamp')
+    let needCopy = true
+    if (fs.existsSync(stampPath) && fs.existsSync(dest)) {
+      try {
+        const stamp = JSON.parse(fs.readFileSync(stampPath, 'utf8'))
+        if (Number(stamp.mtimeMs) === srcStat.mtimeMs && stamp.src === srcResolved) {
+          needCopy = false
+        }
+      } catch {
+        /* recopy */
+      }
+    }
+    if (needCopy) {
+      if (fs.existsSync(dest)) {
+        fs.rmSync(dest, { recursive: true, force: true })
+      }
+      fs.mkdirSync(paths.stateDir, { recursive: true })
+      fs.cpSync(srcResolved, dest, { recursive: true, dereference: true })
+      fs.writeFileSync(
+        stampPath,
+        `${JSON.stringify(
+          {
+            mtimeMs: srcStat.mtimeMs,
+            src: srcResolved,
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        )}\n`,
+      )
+      console.log('[openclaw] 已同步内置插件目录到', dest)
+    }
+    return dest
+  } catch (e) {
+    console.warn(`[openclaw] 复制内置 extensions 失败: ${e.message}`)
+    return tryRealpathSync(srcResolved)
+  }
+}
+
+function discoverEmbeddedPluginIds(pluginRoots) {
+  const ids = new Set()
+  for (const root of pluginRoots) {
+    if (!root || !fs.existsSync(root)) continue
+    let realRoot = root
+    try {
+      realRoot = fs.realpathSync(root)
+    } catch {
+      continue
+    }
+    let dirents
+    try {
+      dirents = fs.readdirSync(realRoot, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const ent of dirents) {
+      if (!ent.isDirectory()) continue
+      const manifestPath = path.join(realRoot, ent.name, 'openclaw.plugin.json')
+      if (!fs.existsSync(manifestPath)) continue
+      try {
+        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+        const id = typeof man?.id === 'string' ? man.id.trim() : ''
+        if (id) ids.add(id)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return ids
+}
+
+function sanitizeEmbeddedOpenClawPluginsAndChannels(config, discoveredIds) {
+  if (discoveredIds && discoveredIds.size > 0) {
+    const rawAllow = Array.isArray(config.plugins.allow) ? config.plugins.allow : []
+    const filteredAllow = normalizeStringArray(
+      rawAllow.map((x) => String(x || '').trim()).filter((id) => discoveredIds.has(id)),
+    )
+    config.plugins.allow =
+      filteredAllow.length > 0
+        ? filteredAllow
+        : normalizeStringArray([...discoveredIds])
+    const nextEntries = {}
+    if (config.plugins.entries && typeof config.plugins.entries === 'object') {
+      for (const [k, v] of Object.entries(config.plugins.entries)) {
+        if (discoveredIds.has(k)) nextEntries[k] = v
+      }
+    }
+    config.plugins.entries = nextEntries
+  }
+
+  if (config.channels && typeof config.channels === 'object') {
+    const channelPlugin = {
+      qqbot: 'openclaw-qqbot',
+      wecom: 'wecom-openclaw-plugin',
+      weixin: 'openclaw-weixin',
+    }
+    for (const [chKey, pluginId] of Object.entries(channelPlugin)) {
+      if (!Object.prototype.hasOwnProperty.call(config.channels, chKey)) continue
+      if (!discoveredIds || discoveredIds.size === 0 || !discoveredIds.has(pluginId)) {
+        delete config.channels[chKey]
+      }
+    }
+  }
 }
 
 function buildDefaultOpenClawConfig(paths) {
@@ -237,9 +376,6 @@ function ensureEmbeddedOpenClawConfig(paths) {
     }
   }
 
-  // Preserve user channel config (qqbot, wecom, etc.). Do not reset channels on each launch —
-  // that would wipe ~/.xclaw/openclaw.json credentials written by Mission Control / 远控通道.
-
   if (!config.channels || typeof config.channels !== 'object') {
     config.channels = {}
   }
@@ -269,10 +405,10 @@ function ensureEmbeddedOpenClawConfig(paths) {
   if (!config.skills.load || typeof config.skills.load !== 'object') config.skills.load = {}
   const existingSkillDirs = Array.isArray(config.skills.load.extraDirs) ? config.skills.load.extraDirs : []
   config.skills.load.extraDirs = normalizeStringArray([
-    ...existingSkillDirs,
-    ...(fs.existsSync(paths.runtimeSkillsDir) ? [paths.runtimeSkillsDir] : []),
-    paths.skillsDir,
-    path.join(paths.workspaceDir, 'skills'),
+    ...existingSkillDirs.map(tryRealpathSync),
+    ...(fs.existsSync(paths.runtimeSkillsDir) ? [tryRealpathSync(paths.runtimeSkillsDir)] : []),
+    tryRealpathSync(paths.skillsDir),
+    tryRealpathSync(path.join(paths.workspaceDir, 'skills')),
   ])
 
   if (!config.plugins || typeof config.plugins !== 'object') config.plugins = {}
@@ -284,13 +420,15 @@ function ensureEmbeddedOpenClawConfig(paths) {
     config.plugins.entries = {}
   }
   if (!config.plugins.load || typeof config.plugins.load !== 'object') config.plugins.load = {}
-  const existingPluginPaths = Array.isArray(config.plugins.load.paths) ? config.plugins.load.paths : []
-  config.plugins.load.paths = normalizeStringArray(
-    [
-      ...existingPluginPaths,
-      ...(fs.existsSync(paths.runtimeExtensionsDir) ? [paths.runtimeExtensionsDir] : []),
-    ],
-  )
+  const bundled = ensureEmbeddedExtensionsCopy(paths)
+  const fallbackExt = fs.existsSync(paths.runtimeExtensionsDir)
+    ? tryRealpathSync(paths.runtimeExtensionsDir)
+    : null
+  const pluginRoots = bundled ? [bundled] : fallbackExt ? [fallbackExt] : []
+  config.plugins.load.paths = normalizeStringArray(pluginRoots)
+
+  const discoveredIds = discoverEmbeddedPluginIds(config.plugins.load.paths)
+  sanitizeEmbeddedOpenClawPluginsAndChannels(config, discoveredIds)
 
   syncExternalOpenClawAgentAuthProfiles(paths, 'main')
 
