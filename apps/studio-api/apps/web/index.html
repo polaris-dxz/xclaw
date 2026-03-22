@@ -27,7 +27,11 @@
         /* 底部面板容器 */
         #main-stage {
             position: relative;
-            width: 1280px;
+            width: 100%;
+            max-width: 1280px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
             transition: transform .25s ease;
             will-change: transform;
         }
@@ -35,23 +39,25 @@
             /* 与右侧抽屉并列：按视口动态左移，确保与抽屉至少保留 20px 间隔 */
             transform: translateX(calc(-1 * max(0px, (min(320px, 92vw) + 20px) - ((100vw - 1280px) / 2))));
         }
+        /* 旧版三栏（昨日小记 / Star 状态 / 访客）默认隐藏，逻辑仍依赖 DOM id */
         #bottom-panels {
-            display: flex;
+            display: none !important;
             gap: 20px;
             width: 1280px;
             max-width: none;
             justify-content: flex-start;
             margin-top: 20px;
         }
+        /* 宽度随父级（含 iframe 嵌入 xclaw 侧栏）收缩，避免 1280px 固定宽度被 overflow-x 裁切 */
         #game-container {
             position: relative;
             border: 0;
             image-rendering: pixelated;
-            width: 1280px;
-            height: 720px;
-            max-width: none;
+            width: 100%;
+            max-width: 1280px;
+            height: auto;
+            aspect-ratio: 1280 / 720;
             max-height: none;
-            aspect-ratio: auto;
             overflow: hidden;
         }
         #game-container canvas {
@@ -994,7 +1000,7 @@
                 max-width: 100vw;
                 min-height: 33.334vh; /* 余下约 1/3 可见区 */
                 padding: 10px 10px 16px;
-                display: flex;
+                display: none !important;
                 flex-direction: column;
                 gap: 10px;
                 flex: 0 0 auto;
@@ -1015,6 +1021,14 @@
             #memo-panel { min-height: 220px; }
             #control-bar { min-height: 210px; }
             #guest-agent-panel { min-height: 220px; }
+
+            /* 侧栏内小记不受 #memo-panel min-height:220px 影响，由 flex 分配高度以便底图 cover */
+            #openclaw-side-panel #memo-panel {
+                min-height: 0 !important;
+                flex: 1 1 0 !important;
+                background-size: cover !important;
+                background-position: center center !important;
+            }
 
             #memo-date {
                 left: 0;
@@ -1128,55 +1142,190 @@
                 min-height: 36px;
             }
         }
-        /* 点击电脑打开的 OpenClaw 聊天面板（右侧滑出） */
-        #openclaw-chat-panel {
+        /* 画面底部居中：相对 #game-container 百分比对齐游戏世界铭牌中心 (640, 684)，避免 canvas / object-fit 换算错位 */
+        #office-plaque-toolbar {
+            position: absolute;
+            left: 50%;
+            top: calc(100% * 684 / 720);
+            transform: translate(-50%, -50%);
+            width: calc(100% * 108 / 1280);
+            min-width: 88px;
+            max-width: 200px;
+            aspect-ratio: 108 / 44;
+            height: auto;
+            box-sizing: border-box;
+            z-index: 55;
+            pointer-events: none;
+            display: none;
+        }
+        #office-plaque-toolbar canvas {
+            pointer-events: auto;
+            cursor: pointer;
+            display: block;
+            width: 100%;
+            height: 100%;
+            vertical-align: top;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        /* 右侧滑出：对话记录 + 昨日小记（同栏切换视图） */
+        #openclaw-side-panel {
             position: absolute;
             top: 0;
             right: 0;
-            width: 380px;
-            height: 720px;
+            width: min(380px, 42vw);
+            height: 100%;
+            z-index: 50;
+            display: flex;
+            flex-direction: column;
             background: linear-gradient(180deg, #f5f0e6 0%, #e8dfd0 100%);
             box-shadow: -8px 0 24px rgba(0,0,0,.35);
             border-left: 3px solid #8b7355;
-            z-index: 100;
-            display: none;
-            flex-direction: column;
             border-radius: 8px 0 0 8px;
+            transform: translateX(100%);
+            transition: transform 0.28s ease;
+            pointer-events: none;
         }
-        #openclaw-chat-panel.open {
-            display: flex;
+        #openclaw-side-panel.open {
+            transform: translateX(0);
+            pointer-events: auto;
         }
-        #openclaw-chat-header {
+        .openclaw-side-header {
             flex-shrink: 0;
-            padding: 12px 14px;
-            background: rgba(139,115,85,.25);
-            border-bottom: 2px solid #8b7355;
+            position: relative;
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: center;
+            min-height: 44px;
+            padding: 8px 40px 8px 12px;
+            border-bottom: 2px solid rgba(139, 115, 85, 0.45);
+            background: rgba(241, 235, 224, 0.98);
+            box-shadow: 0 1px 0 rgba(255, 255, 255, 0.35) inset;
         }
-        #openclaw-chat-header h3 {
-            font-size: 14px;
+        .openclaw-side-title {
+            font-family: 'ArkPixel', 'Courier New', monospace;
+            font-size: 13px;
+            font-weight: bold;
             color: #3e2723;
+            letter-spacing: 0.5px;
+            text-align: center;
+            pointer-events: none;
+            user-select: none;
+        }
+        .openclaw-side-close {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 32px;
+            height: 32px;
+            padding: 0;
             margin: 0;
-        }
-        #openclaw-chat-close {
-            background: transparent;
-            border: 1px solid #8b7355;
-            color: #3e2723;
-            padding: 4px 10px;
+            border: 2px solid #5d4037;
+            border-radius: 6px;
+            background: #6d4c41;
+            color: #f5f0e6;
+            font-family: 'ArkPixel', monospace;
+            font-size: 18px;
+            line-height: 1;
             cursor: pointer;
-            font-family: inherit;
-            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
-        #openclaw-chat-close:hover { background: rgba(139,115,85,.2); }
+        .openclaw-side-close:hover {
+            background: #8d6e63;
+            border-color: #4e342e;
+        }
+        .openclaw-side-close:active {
+            background: #5d4037;
+        }
+        .openclaw-side-view {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .openclaw-side-view[hidden] {
+            display: none !important;
+        }
         #openclaw-chat-messages {
             flex: 1;
+            min-height: 0;
             overflow-y: auto;
             padding: 12px;
             display: flex;
             flex-direction: column;
             gap: 10px;
+            color: #3e2723;
+        }
+        .openclaw-chat-empty {
+            padding: 18px 14px;
+            font-size: 13px;
+            line-height: 1.55;
+            color: #5d4e3f;
+            text-align: center;
+            align-self: center;
+            max-width: 94%;
+            border: 1px dashed rgba(139, 115, 85, 0.5);
+            border-radius: 10px;
+            background: rgba(255, 250, 235, 0.75);
+        }
+        .openclaw-chat-empty[hidden] {
+            display: none !important;
+        }
+        /* 侧栏内的昨日小记：flex 吃满侧栏高度，底图 cover 随容器变化（避免固定 460×300 裁切感） */
+        #openclaw-side-panel #openclaw-side-view-memo {
+            flex: 1 1 0;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        #openclaw-side-panel #memo-panel {
+            width: 100% !important;
+            max-width: none !important;
+            flex: 1 1 0;
+            min-height: 0 !important;
+            align-self: stretch;
+            max-height: none;
+            overflow: hidden;
+            box-sizing: border-box;
+            background-size: cover !important;
+            background-position: center center !important;
+            background-repeat: no-repeat !important;
+        }
+        #openclaw-side-panel #memo-title {
+            top: 8px;
+        }
+        #openclaw-side-panel #memo-date {
+            left: 0;
+            padding-right: 6px;
+        }
+        #openclaw-side-panel #memo-content {
+            left: 0 !important;
+            flex: 1 1 0;
+            min-height: 0;
+            max-width: 100%;
+            padding-left: 10px;
+            padding-right: 10px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        /* 底部输入条：始终占位（参考图 2） */
+        #openclaw-bottom-bar {
+            width: 100%;
+            max-width: 1280px;
+            margin-top: 12px;
+            background: linear-gradient(180deg, #f5f0e6 0%, #e8dfd0 100%);
+            box-shadow: 0 -4px 18px rgba(0,0,0,.22);
+            border: 3px solid #8b7355;
+            border-radius: 10px;
+            z-index: 45;
+        }
+        #openclaw-bottom-bar .openclaw-composer {
+            border-top: none;
         }
         .openclaw-msg {
             max-width: 92%;
@@ -1224,15 +1373,54 @@
             color: #5d1a1a;
             border: 1px solid rgba(180,60,60,.4);
         }
-        #openclaw-chat-input-row {
+        .openclaw-composer {
             flex-shrink: 0;
-            padding: 10px 12px;
-            border-top: 2px solid rgba(139,115,85,.4);
-            background: rgba(245,240,230,.9);
+            padding: 10px 12px 8px;
+            border-top: 2px solid rgba(139,115,85,.35);
+            background: rgba(245,240,230,.95);
+        }
+        .openclaw-bottom-row {
+            display: flex;
+            align-items: stretch;
+            gap: 10px;
+        }
+        .openclaw-status-chip {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 10px;
+            background: rgba(255, 250, 235, 0.95);
+            border: 2px solid #c4a882;
+            border-radius: 8px;
+            max-width: 38%;
+            min-width: 120px;
+        }
+        .openclaw-avatar {
+            font-size: 22px;
+            line-height: 1;
+        }
+        #openclaw-status-line {
+            font-size: 12px;
+            color: #3e2723;
+            line-height: 1.35;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+        }
+        .openclaw-input-wrap {
+            flex: 1;
+            display: flex;
+            align-items: stretch;
+            gap: 8px;
+            min-width: 0;
         }
         #openclaw-chat-input {
-            width: 100%;
-            min-height: 56px;
+            flex: 1;
+            min-width: 0;
+            min-height: 44px;
+            max-height: 120px;
             padding: 10px 12px;
             border: 2px solid #8b7355;
             border-radius: 8px;
@@ -1242,19 +1430,26 @@
             box-sizing: border-box;
         }
         #openclaw-chat-send {
-            margin-top: 8px;
-            width: 100%;
-            padding: 10px;
-            background: #5d4037;
+            flex: 0 0 44px;
+            width: 44px;
+            padding: 0;
+            background: #9e9e9e;
             color: #f5f0e6;
-            border: none;
-            border-radius: 6px;
+            border: 2px solid #757575;
+            border-radius: 8px;
             cursor: pointer;
             font-family: inherit;
-            font-size: 14px;
+            font-size: 16px;
+            line-height: 1;
         }
-        #openclaw-chat-send:hover { background: #4e342e; }
+        #openclaw-chat-send:hover { background: #7e7e7e; }
         #openclaw-chat-send:disabled { opacity: .6; cursor: not-allowed; }
+        .openclaw-disclaimer {
+            margin-top: 6px;
+            font-size: 11px;
+            color: #78909c;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -1270,35 +1465,52 @@
         <div id="game-container">
             <div id="game-skeleton"><div class="hint">正在进入像素办公室…</div></div>
             <div id="status-text">加载中...</div>
+            <aside id="openclaw-side-panel" aria-label="对话与昨日小记" aria-hidden="true">
+                <header id="openclaw-side-header" class="openclaw-side-header">
+                    <div id="openclaw-side-title" class="openclaw-side-title" role="timer" aria-live="polite"></div>
+                    <button type="button" id="openclaw-side-close" class="openclaw-side-close" title="关闭" aria-label="关闭">×</button>
+                </header>
+                <div id="openclaw-side-view-chat" class="openclaw-side-view">
+                    <div id="openclaw-chat-messages">
+                        <div id="openclaw-chat-empty" class="openclaw-chat-empty" role="status"></div>
+                    </div>
+                </div>
+                <div id="openclaw-side-view-memo" class="openclaw-side-view" hidden>
+                    <div id="memo-panel">
+                        <div id="memo-title">昨 日 小 记</div>
+                        <div id="memo-date"></div>
+                        <div class="memo-decoration">─ ─ ─ ─ ─</div>
+                        <div id="memo-content">
+                            <div id="memo-placeholder">加载中...</div>
+                        </div>
+                        <div class="memo-decoration">─ ─ ─ ─ ─</div>
+                    </div>
+                </div>
+            </aside>
+            <div id="office-plaque-toolbar" role="toolbar" aria-label="工作室快捷操作">
+                <canvas id="office-plaque-canvas" width="108" height="36" aria-hidden="true"></canvas>
+            </div>
         </div>
 
-        <!-- 点击电脑打开的本地小龙虾聊天面板 -->
-        <aside id="openclaw-chat-panel" aria-label="与本地 Agent 对话">
-            <div id="openclaw-chat-header">
-                <h3>与本地小龙虾对话</h3>
-                <button id="openclaw-chat-close" type="button" onclick="closeOpenclawChatPanel()">关闭</button>
+        <!-- 底部输入：始终显示；发送与旧版一致，侧栏展示消息 -->
+        <div id="openclaw-bottom-bar">
+            <div class="openclaw-composer">
+                <div class="openclaw-bottom-row">
+                    <div class="openclaw-status-chip" title="">
+                        <span class="openclaw-avatar" aria-hidden="true">🦞</span>
+                        <span id="openclaw-status-line"></span>
+                    </div>
+                    <div class="openclaw-input-wrap">
+                        <textarea id="openclaw-chat-input" placeholder="可以描述任务或提问任何问题，按 Enter 发送…" rows="2"></textarea>
+                        <button id="openclaw-chat-send" type="button" onclick="sendOpenclawChatMessage()" aria-label="发送" title="发送">▶</button>
+                    </div>
+                </div>
+                <div id="openclaw-disclaimer" class="openclaw-disclaimer">内容由 AI 生成，请仔细甄别</div>
             </div>
-            <div id="openclaw-chat-messages"></div>
-            <div id="openclaw-chat-input-row">
-                <textarea id="openclaw-chat-input" placeholder="输入消息发送给本地 OpenClaw Agent…" rows="2" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendOpenclawChatMessage();}"></textarea>
-                <button id="openclaw-chat-send" type="button" onclick="sendOpenclawChatMessage()">发送</button>
-            </div>
-        </aside>
-    
-    <!-- 底部面板容器 -->
-    <div id="bottom-panels">
-        <!-- Memo 面板 -->
-        <div id="memo-panel">
-            <div id="memo-title">昨 日 小 记</div>
-            <div id="memo-date"></div>
-            <div class="memo-decoration">─ ─ ─ ─ ─</div>
-            <div id="memo-content">
-                <div id="memo-placeholder">加载中...</div>
-            </div>
-            <div class="memo-decoration">─ ─ ─ ─ ─</div>
         </div>
-        
-        <!-- 状态控制栏 -->
+
+    <!-- 旧版三栏：默认隐藏，供 Star 状态 / 访客 API 与调试仍可使用 -->
+    <div id="bottom-panels">
         <div id="control-bar">
             <div id="control-bar-title">Star 状态</div>
             <div id="control-buttons">
@@ -1310,16 +1522,15 @@
             </div>
         </div>
 
-        <!-- Guest Agent 名单面板（右下角） -->
         <div id="guest-agent-panel">
             <div id="guest-agent-panel-title">访 客 列 表</div>
             <div id="guest-agent-list">
                 <div style="color:#9ca3af;font-size:12px;text-align:center;padding:20px 0;">正在加载访客...</div>
             </div>
-            </div>
         </div>
     </div>
-    
+    </div>
+
     <div id="asset-highlight"></div>
     <div id="room-loading-overlay" aria-live="polite" aria-busy="true">
         <div class="room-loading-inner">
@@ -1430,13 +1641,13 @@
     <div id="coords-overlay" style="display:none; position:fixed; pointer-events:none; background:rgba(0,0,0,0.85); color:#fff; font-family:ArkPixel,monospace; font-size:14px; padding:8px 12px; border-radius:4px; z-index:99999;">
         <div id="coords-display">X: 0 | Y: 0</div>
     </div>
-    <button id="coords-toggle" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); right:12px; z-index:999999; padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">
-        显示坐标
-    </button>
     <button id="pan-toggle" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 12px); left:12px; z-index:999999; padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">
         移动视野
     </button>
-    <div id="lang-toggle-group" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 52px); left:12px; z-index:1000002; display:none; gap:2px; align-items:center;">
+    <button id="coords-toggle" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 60px); left:12px; z-index:999999; padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">
+        显示坐标
+    </button>
+    <div id="lang-toggle-group" style="position:fixed; top:calc(env(safe-area-inset-top, 0px) + 112px); left:12px; z-index:1000002; display:none; gap:2px; align-items:center;">
         <button id="lang-btn-en" onclick="setUILanguage('en')" style="padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">EN</button>
         <button id="lang-btn-jp" onclick="setUILanguage('ja')" style="padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">JP</button>
         <button id="lang-btn-cn" onclick="setUILanguage('zh')" style="padding:8px 10px; font-family:ArkPixel,monospace; font-size:13px; cursor:pointer; border:2px solid #333; border-radius:5px; background:#333; color:#fff;">CN</button>
@@ -1475,7 +1686,14 @@
                 assetHintDefault: '通用素材：建议保持原图尺寸、透明通道与视觉重心一致，避免错位或失真',
                 showCoords: '显示坐标', hideCoords: '隐藏坐标', moveView: '移动视野', lockView: '锁定视野',
                 memoTitle: '昨 日 小 记', guestTitle: '访 客 列 表', officeTitle: '我的办公室',
-                loadingOffice: '正在加载 Star 的像素办公室...'
+                loadingOffice: '正在加载 Star 的像素办公室...',
+                studioTipChat: '对话',
+                studioTipMemo: '日记',
+                studioTipDecor: '装修房间',
+                openclawPlaceholder: '可以描述任务或提问任何问题，按 Enter 发送…',
+                openclawDisclaimer: '内容由 AI 生成，请仔细甄别',
+                openclawChatEmpty: '还没有消息。在下方输入框输入内容，按 Enter 或点发送，与本地 Agent 对话。',
+                openclawSideClose: '关闭'
             },
             en: {
                 controlTitle: 'Star Status',
@@ -1504,7 +1722,14 @@
                 assetHintDefault: 'Generic asset: keep source size, alpha channel, and visual anchor to avoid drift/distortion',
                 showCoords: 'Show Coords', hideCoords: 'Hide Coords', moveView: 'Pan View', lockView: 'Lock View',
                 memoTitle: 'YESTERDAY NOTES', guestTitle: 'VISITOR LIST', officeTitle: 'My Office',
-                loadingOffice: 'Loading Star’s pixel office...'
+                loadingOffice: 'Loading Star’s pixel office...',
+                studioTipChat: 'Chat',
+                studioTipMemo: 'Diary',
+                studioTipDecor: 'Decorate room',
+                openclawPlaceholder: 'Describe a task or ask anything. Press Enter to send.',
+                openclawDisclaimer: 'Content is AI-generated. Please verify carefully.',
+                openclawChatEmpty: 'No messages yet. Type below and press Enter or Send to chat with the local agent.',
+                openclawSideClose: 'Close'
             },
             ja: {
                 controlTitle: 'Star ステータス',
@@ -1533,7 +1758,14 @@
                 assetHintDefault: '汎用素材：元サイズ・透過・視覚アンカーを維持し、ズレや崩れを防いでください',
                 showCoords: '座標表示', hideCoords: '座標非表示', moveView: '視点移動', lockView: '視点固定',
                 memoTitle: '昨日のメモ', guestTitle: '訪問者リスト', officeTitle: 'マイオフィス',
-                loadingOffice: 'Star のピクセルオフィスを読み込み中...'
+                loadingOffice: 'Star のピクセルオフィスを読み込み中...',
+                studioTipChat: 'チャット',
+                studioTipMemo: '日記',
+                studioTipDecor: '部屋を編集',
+                openclawPlaceholder: 'タスクの説明や質問を入力。Enter で送信。',
+                openclawDisclaimer: '内容は AI 生成です。内容をご確認ください。',
+                openclawChatEmpty: 'まだメッセージがありません。下の入力欄から Enter 送信でローカル Agent と話せます。',
+                openclawSideClose: '閉じる'
             }
         };
 
@@ -1620,9 +1852,17 @@
             if (memoTitle) memoTitle.textContent = t('memoTitle');
             const guestTitle = document.getElementById('guest-agent-panel-title');
             if (guestTitle) guestTitle.textContent = t('guestTitle');
-            const plaqueTitle = (typeof window.officeNameFromServer !== 'undefined' && window.officeNameFromServer) || t('officeTitle');
-            if (window.officePlaqueText && window.officePlaqueText.setText) {
-                window.officePlaqueText.setText(plaqueTitle);
+
+            window._studioTips = { chat: t('studioTipChat'), memo: t('studioTipMemo'), decor: t('studioTipDecor') };
+            if (typeof drawOfficePlaqueToolbar === 'function') drawOfficePlaqueToolbar();
+            setPh('openclaw-chat-input', 'openclawPlaceholder');
+            setText('openclaw-disclaimer', 'openclawDisclaimer');
+            setText('openclaw-chat-empty', 'openclawChatEmpty');
+            if (typeof updateOpenclawChatEmptyVisibility === 'function') updateOpenclawChatEmptyVisibility();
+            const openclawClose = document.getElementById('openclaw-side-close');
+            if (openclawClose) {
+                openclawClose.setAttribute('aria-label', t('openclawSideClose'));
+                openclawClose.title = t('openclawSideClose');
             }
 
             const coordsBtn = document.getElementById('coords-toggle');
@@ -1634,6 +1874,7 @@
             }
             ensureMemoBgVisible();
             renderBootLoadingText(Number(loadingProgressBar?.style?.width?.replace('%','') || 0));
+            if (typeof updateOpenclawSidePanelTitleTime === 'function') updateOpenclawSidePanelTitleTime();
         }
 
         function setUILanguage(lang) {
@@ -1815,13 +2056,15 @@
         let game, star, sofa, serverroom, officeBgSprite, areas = {}, currentState = 'idle', pendingDesiredState = null, statusText, lastFetch = 0, lastBlink = 0, lastBubble = 0, targetX = 660, targetY = 170, bubble = null, typewriterText = '', typewriterTarget = '', typewriterIndex = 0, lastTypewriter = 0, syncAnimSprite = null, syncAnimPlayable = false, catBubble = null, selectionBoxGraphics = null;
         const IDLE_SOFA_ANCHOR = { x: 798, y: 272 }; // 统一中心锚点（原 sofa 左上 670,144 的中心）
         const IDLE_STAR_SCALE = 1.0; // star idle 改为256帧原生显示，不再放大
-        // flowers 精灵表规格：固定单帧 128x128，4x4
-        let FLOWERS_FRAME_W = 65;
-        let FLOWERS_FRAME_H = 65;
+        // flowers 精灵表规格：固定单帧 128x128，4x4（须与 preload 一致，否则帧错位会像「被裁切」）
+        let FLOWERS_FRAME_W = 128;
+        let FLOWERS_FRAME_H = 128;
         let FLOWERS_FRAME_COLS = 4;
         let FLOWERS_FRAME_ROWS = 4;
         let currentOfficeBgTextureKey = 'office_bg';
         let assetDrawerOpen = false;
+        /** 侧栏高亮：'chat' | 'memo' | null；装修按钮高亮见 assetDrawerOpen */
+        let studioRailActive = null;
         let assetDrawerAuthed = false;
         let assetManualPanelOpen = false;
         let assetFilterMode = 'all';
@@ -1900,56 +2143,330 @@
             });
         }
 
-        // —— OpenClaw 本地网关聊天（点击电脑打开）——
+        // —— OpenClaw：底部输入始终显示；消息列表右侧滑出（与旧版一致）——
+        function syncOpenclawStatusLineFromGame() {
+            const st = document.getElementById('status-text');
+            const line = document.getElementById('openclaw-status-line');
+            if (st && line) line.textContent = st.textContent || '';
+        }
+
+        function placeOfficePlaqueToolbar() {
+            const wrap = document.getElementById('office-plaque-toolbar');
+            const gc = document.getElementById('game-container');
+            if (!wrap || !gc) return;
+            const ready = !!(typeof game !== 'undefined' && game && game.canvas);
+            wrap.style.display = ready ? 'block' : 'none';
+        }
+
+        function blitPattern8(ctx, x0, y0, pat, scale, color) {
+            for (let py = 0; py < 8; py++) {
+                for (let px = 0; px < 8; px++) {
+                    if (pat[py * 8 + px]) {
+                        ctx.fillStyle = color;
+                        ctx.fillRect(x0 + px * scale, y0 + py * scale, scale, scale);
+                    }
+                }
+            }
+        }
+
+        function drawOfficePlaqueToolbar() {
+            const c = document.getElementById('office-plaque-canvas');
+            if (!c) return;
+            const ctx = c.getContext('2d');
+            if (!ctx) return;
+            ctx.imageSmoothingEnabled = false;
+            const W = c.width;
+            const H = c.height;
+            ctx.clearRect(0, 0, W, H);
+
+            const chatOn = studioRailActive === 'chat';
+            const memoOn = studioRailActive === 'memo';
+            const decorOn = !!assetDrawerOpen;
+
+            const btnW = 32;
+            const gap = 6;
+            const y0 = 2;
+            const x0s = [0, btnW + gap, (btnW + gap) * 2];
+            const S = 2;
+
+            const chatPat = [
+                0,0,1,1,1,1,0,0,
+                0,1,1,1,1,1,1,0,
+                1,1,1,1,1,1,1,1,
+                1,1,1,1,1,1,1,1,
+                1,1,1,1,1,1,1,1,
+                0,1,1,1,1,1,1,0,
+                0,0,1,1,1,1,0,0,
+                0,0,0,0,0,0,0,0
+            ];
+            const memoPat = [
+                0,1,1,1,1,1,1,0,
+                1,1,1,1,1,1,1,1,
+                1,0,0,0,0,0,0,1,
+                1,0,1,1,1,1,0,1,
+                1,0,1,1,1,1,0,1,
+                1,0,0,0,0,0,0,1,
+                1,1,1,1,1,1,1,1,
+                0,1,1,1,1,1,1,0
+            ];
+            const decorPat = [
+                0,0,0,1,1,0,0,0,
+                0,0,1,1,1,1,0,0,
+                0,1,1,1,1,1,1,0,
+                1,1,1,1,1,1,1,1,
+                1,1,1,1,1,1,1,1,
+                0,1,0,1,0,1,0,1,
+                0,1,0,1,0,1,0,1,
+                0,0,0,0,0,0,0,0
+            ];
+
+            const drawBtn = (xi, active, pat, iconColor) => {
+                const x = x0s[xi];
+                const border = active ? '#3e2723' : '#2a1f18';
+                const face = active ? '#e94560' : '#4a4a4a';
+                const hi = active ? '#ff6b7a' : '#6a6a6a';
+                const lo = active ? '#c93652' : '#3a3a3a';
+                ctx.fillStyle = border;
+                ctx.fillRect(x, y0, btnW, btnW);
+                ctx.fillStyle = face;
+                ctx.fillRect(x + 1, y0 + 1, btnW - 2, btnW - 2);
+                ctx.fillStyle = hi;
+                ctx.fillRect(x + 2, y0 + 2, btnW - 4, 2);
+                ctx.fillStyle = lo;
+                ctx.fillRect(x + 2, y0 + btnW - 4, btnW - 4, 2);
+                blitPattern8(ctx, x + 8, y0 + 8, pat, S, iconColor);
+            };
+
+            drawBtn(0, chatOn, chatPat, '#ffd54f');
+            drawBtn(1, memoOn, memoPat, '#fff8e1');
+            drawBtn(2, decorOn, decorPat, '#ffd54f');
+        }
+
+        function setStudioRailActive(which) {
+            studioRailActive = which;
+            drawOfficePlaqueToolbar();
+        }
+
+        function updateOpenclawSidePanelTitleTime() {
+            const el = document.getElementById('openclaw-side-title');
+            if (!el) return;
+            const now = new Date();
+            try {
+                el.textContent = now.toLocaleString(uiLang === 'zh' ? 'zh-CN' : (uiLang === 'ja' ? 'ja-JP' : 'en-US'), {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false
+                });
+            } catch (e) {
+                const p = (n) => String(n).padStart(2, '0');
+                el.textContent = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}`;
+            }
+        }
+
+        function setOpenclawSideOpen(open) {
+            const sp = document.getElementById('openclaw-side-panel');
+            if (!sp) return;
+            sp.classList.toggle('open', !!open);
+            sp.setAttribute('aria-hidden', open ? 'false' : 'true');
+            if (open) {
+                updateOpenclawSidePanelTitleTime();
+                if (window._openclawSideClock) {
+                    clearInterval(window._openclawSideClock);
+                    window._openclawSideClock = null;
+                }
+                window._openclawSideClock = setInterval(updateOpenclawSidePanelTitleTime, 1000);
+            } else {
+                if (window._openclawSideClock) {
+                    clearInterval(window._openclawSideClock);
+                    window._openclawSideClock = null;
+                }
+            }
+        }
+
+        function updateOpenclawChatEmptyVisibility() {
+            const c = document.getElementById('openclaw-chat-messages');
+            const empty = document.getElementById('openclaw-chat-empty');
+            if (!c || !empty) return;
+            const hasMsg = !!c.querySelector('.openclaw-msg');
+            empty.hidden = hasMsg;
+        }
+
+        /** 侧栏内切换：对话 / 昨日小记 */
+        function setSidePanelView(mode) {
+            const chatV = document.getElementById('openclaw-side-view-chat');
+            const memoV = document.getElementById('openclaw-side-view-memo');
+            if (chatV) chatV.hidden = mode !== 'chat';
+            if (memoV) memoV.hidden = mode !== 'memo';
+            if (mode === 'chat') updateOpenclawChatEmptyVisibility();
+        }
+
+        /** 💬：展开/收起右侧侧栏；已打开且为日记时切到对话，已打开且为对话时再点则收起 */
+        function toggleOpenclawSidePanel() {
+            const sp = document.getElementById('openclaw-side-panel');
+            if (!sp) return;
+            const isOpen = sp.classList.contains('open');
+            const chatV = document.getElementById('openclaw-side-view-chat');
+            const chatShowing = chatV && !chatV.hidden;
+            if (!isOpen) {
+                setSidePanelView('chat');
+                setOpenclawSideOpen(true);
+                setStudioRailActive('chat');
+                syncOpenclawStatusLineFromGame();
+                return;
+            }
+            if (!chatShowing) {
+                setSidePanelView('chat');
+                setStudioRailActive('chat');
+                syncOpenclawStatusLineFromGame();
+                return;
+            }
+            setOpenclawSideOpen(false);
+            setStudioRailActive(null);
+            syncOpenclawStatusLineFromGame();
+        }
+
+        function toggleStudioDockChat() {
+            toggleOpenclawSidePanel();
+        }
+
+        function toggleStudioDockMemo() {
+            const sp = document.getElementById('openclaw-side-panel');
+            if (!sp) return;
+            const memoV = document.getElementById('openclaw-side-view-memo');
+            const isOpen = sp.classList.contains('open');
+            const memoShowing = memoV && !memoV.hidden;
+            if (isOpen && memoShowing) {
+                setOpenclawSideOpen(false);
+                setStudioRailActive(null);
+                return;
+            }
+            setSidePanelView('memo');
+            setOpenclawSideOpen(true);
+            setStudioRailActive('memo');
+            syncOpenclawStatusLineFromGame();
+        }
+
         function openOpenclawChatPanel() {
-            const panel = document.getElementById('openclaw-chat-panel');
-            if (!panel) return;
-            panel.classList.add('open');
-            const input = document.getElementById('openclaw-chat-input');
-            if (input) setTimeout(() => input.focus(), 200);
+            setSidePanelView('chat');
+            setOpenclawSideOpen(true);
+            setStudioRailActive('chat');
+            syncOpenclawStatusLineFromGame();
         }
         function closeOpenclawChatPanel() {
-            const panel = document.getElementById('openclaw-chat-panel');
-            if (!panel) return;
-            panel.classList.remove('open');
+            setOpenclawSideOpen(false);
+            setStudioRailActive(null);
+            syncOpenclawStatusLineFromGame();
         }
-        function appendOpenclawChatBubble(text, role) {
-            const box = document.getElementById('openclaw-chat-messages');
-            if (!box) return;
+
+        function appendOpenclawChatMessage(role, text, opts = {}) {
+            const container = document.getElementById('openclaw-chat-messages');
+            if (!container) return null;
             const div = document.createElement('div');
-            div.className = 'openclaw-msg ' + (role === 'user' ? 'user' : role === 'error' ? 'error' : 'agent');
-            div.textContent = text;
-            box.appendChild(div);
-            box.scrollTop = box.scrollHeight;
+            div.className = 'openclaw-msg ' + role;
+            if (opts.typing) {
+                div.classList.add('typing');
+                div.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+            } else {
+                div.textContent = text;
+            }
+            container.appendChild(div);
+            updateOpenclawChatEmptyVisibility();
+            container.scrollTop = container.scrollHeight;
+            return div;
         }
+
         async function sendOpenclawChatMessage() {
             const input = document.getElementById('openclaw-chat-input');
             const btn = document.getElementById('openclaw-chat-send');
-            if (!input || !btn) return;
-            const text = (input.value || '').trim();
-            if (!text) return;
-            appendOpenclawChatBubble(text, 'user');
-            input.value = '';
-            btn.disabled = true;
+            const msg = (input && input.value) ? input.value.trim() : '';
+            if (!msg) return;
+            setSidePanelView('chat');
+            setOpenclawSideOpen(true);
+            setStudioRailActive('chat');
+            syncOpenclawStatusLineFromGame();
+            if (btn) btn.disabled = true;
+            appendOpenclawChatMessage('user', msg);
+            if (input) input.value = '';
+            const pendingBubble = appendOpenclawChatMessage('agent', '', { typing: true });
             try {
-                const res = await fetch('/openclaw-chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: text }),
-                    cache: 'no-store'
-                });
-                const data = await res.json().catch(() => ({}));
-                if (data.ok && typeof data.reply === 'string') {
-                    appendOpenclawChatBubble(data.reply || '(空回复)', 'agent');
+                if (window.parent !== window) {
+                    const requestId = 'xclaw-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+                    const done = await new Promise(function (resolve) {
+                        var timeoutMs = 120000;
+                        var timer = setTimeout(function () {
+                            window.removeEventListener('message', onParentMsg);
+                            resolve({ ok: false, err: '等待主应用响应超时' });
+                        }, timeoutMs);
+                        function onParentMsg(ev) {
+                            var d = ev.data;
+                            if (!d || d.type !== 'xclaw:studio-chat-result' || d.requestId !== requestId) return;
+                            clearTimeout(timer);
+                            window.removeEventListener('message', onParentMsg);
+                            resolve(d);
+                        }
+                        window.addEventListener('message', onParentMsg);
+                        window.parent.postMessage({ type: 'xclaw:studio-chat-send', requestId: requestId, text: msg }, '*');
+                    });
+                    if (done.ok && done.reply != null) {
+                        if (pendingBubble) {
+                            pendingBubble.classList.remove('typing');
+                            pendingBubble.textContent = done.reply;
+                        } else {
+                            appendOpenclawChatMessage('agent', done.reply);
+                        }
+                    } else {
+                        var errText = (done && done.error) ? done.error : '请求失败';
+                        if (pendingBubble) {
+                            pendingBubble.className = 'openclaw-msg error';
+                            pendingBubble.textContent = errText;
+                        } else {
+                            appendOpenclawChatMessage('error', errText);
+                        }
+                    }
                 } else {
-                    appendOpenclawChatBubble(data.msg || `请求失败 (${res.status})`, 'error');
+                    const res = await fetch('/openclaw-chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: msg })
+                    });
+                    const data = await res.json();
+                    if (data.ok && data.reply != null) {
+                        if (pendingBubble) {
+                            pendingBubble.classList.remove('typing');
+                            pendingBubble.textContent = data.reply;
+                        } else {
+                            appendOpenclawChatMessage('agent', data.reply);
+                        }
+                    } else {
+                        if (pendingBubble) {
+                            pendingBubble.className = 'openclaw-msg error';
+                            pendingBubble.textContent = data.msg || '请求失败';
+                        } else {
+                            appendOpenclawChatMessage('error', data.msg || '请求失败');
+                        }
+                    }
                 }
             } catch (e) {
-                appendOpenclawChatBubble(String(e && e.message ? e.message : e), 'error');
-            } finally {
-                btn.disabled = false;
+                if (pendingBubble) {
+                    pendingBubble.className = 'openclaw-msg error';
+                    pendingBubble.textContent = '网络错误: ' + (e.message || e);
+                } else {
+                    appendOpenclawChatMessage('error', '网络错误: ' + (e.message || e));
+                }
             }
+            if (btn) btn.disabled = false;
         }
+
+        window.openOpenclawChatPanel = openOpenclawChatPanel;
+        window.closeOpenclawChatPanel = closeOpenclawChatPanel;
+        window.toggleOpenclawSidePanel = toggleOpenclawSidePanel;
+        window.toggleStudioDockChat = toggleStudioDockChat;
+        window.toggleStudioDockMemo = toggleStudioDockMemo;
+
         (function bindOpenclawChatEnter() {
             const ta = document.getElementById('openclaw-chat-input');
             if (ta) {
@@ -1961,6 +2478,41 @@
                 });
             }
         })();
+
+        (function bindOpenclawSideClose() {
+            const btn = document.getElementById('openclaw-side-close');
+            if (btn) btn.addEventListener('click', () => closeOpenclawChatPanel());
+        })();
+
+        function bindOfficePlaqueCanvas() {
+            const c = document.getElementById('office-plaque-canvas');
+            if (!c || c.dataset.bound === '1') return;
+            c.dataset.bound = '1';
+            c.addEventListener('click', (e) => {
+                const rect = c.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const w = rect.width;
+                const seg = w / 3;
+                const i = Math.min(2, Math.floor(x / seg));
+                if (i === 0) toggleStudioDockChat();
+                else if (i === 1) toggleStudioDockMemo();
+                else if (typeof toggleAssetDrawer === 'function') void toggleAssetDrawer();
+            });
+            c.addEventListener('mousemove', (e) => {
+                const rect = c.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const w = rect.width;
+                const seg = w / 3;
+                const i = Math.min(2, Math.floor(x / seg));
+                const tips = window._studioTips || { chat: '对话', memo: '日记', decor: '装修' };
+                c.title = [tips.chat, tips.memo, tips.decor][i] || '';
+            });
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', bindOfficePlaqueCanvas);
+        } else {
+            bindOfficePlaqueCanvas();
+        }
 
         function updateAssetAuthUI() {
             const gate = document.getElementById('asset-auth-gate');
@@ -3017,6 +3569,7 @@ function toggleBrokerPanel() {
                     st.style.maxWidth = 'calc(100% - 28px)';
                 }
             }
+            if (typeof placeOfficePlaqueToolbar === 'function') placeOfficePlaqueToolbar();
         }
 
         function showRoomLoadingOverlay(baseText) {
@@ -3563,6 +4116,7 @@ function toggleBrokerPanel() {
                 openBtn.classList.toggle('is-active', next);
                 openBtn.textContent = t('btnDecor');
             }
+            if (typeof drawOfficePlaqueToolbar === 'function') drawOfficePlaqueToolbar();
             const closeBtn = document.getElementById('btn-close-drawer');
             if (closeBtn) closeBtn.textContent = t('drawerClose');
             if (next) {
@@ -3585,78 +4139,6 @@ function toggleBrokerPanel() {
                 clearAssetSelectionUI();
             }
         }
-
-        // 点击电脑打开的 OpenClaw 聊天面板（与本地小龙虾对话）
-        function openOpenclawChatPanel() {
-            const panel = document.getElementById('openclaw-chat-panel');
-            if (panel) {
-                panel.classList.add('open');
-                document.getElementById('openclaw-chat-input')?.focus();
-            }
-        }
-        function closeOpenclawChatPanel() {
-            const panel = document.getElementById('openclaw-chat-panel');
-            if (panel) panel.classList.remove('open');
-        }
-        function appendOpenclawChatMessage(role, text, opts = {}) {
-            const container = document.getElementById('openclaw-chat-messages');
-            if (!container) return null;
-            const div = document.createElement('div');
-            div.className = 'openclaw-msg ' + role;
-            if (opts.typing) {
-                div.classList.add('typing');
-                div.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
-            } else {
-                div.textContent = text;
-            }
-            container.appendChild(div);
-            container.scrollTop = container.scrollHeight;
-            return div;
-        }
-        async function sendOpenclawChatMessage() {
-            const input = document.getElementById('openclaw-chat-input');
-            const btn = document.getElementById('openclaw-chat-send');
-            const msg = (input && input.value) ? input.value.trim() : '';
-            if (!msg) return;
-            if (btn) btn.disabled = true;
-            appendOpenclawChatMessage('user', msg);
-            if (input) input.value = '';
-            // 立即在左侧放一个“思考中”气泡，避免等待阶段留白
-            const pendingBubble = appendOpenclawChatMessage('agent', '', { typing: true });
-            try {
-                const res = await fetch('/openclaw-chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: msg })
-                });
-                const data = await res.json();
-                if (data.ok && data.reply != null) {
-                    if (pendingBubble) {
-                        pendingBubble.classList.remove('typing');
-                        pendingBubble.textContent = data.reply;
-                    } else {
-                        appendOpenclawChatMessage('agent', data.reply);
-                    }
-                } else {
-                    if (pendingBubble) {
-                        pendingBubble.className = 'openclaw-msg error';
-                        pendingBubble.textContent = data.msg || '请求失败';
-                    } else {
-                        appendOpenclawChatMessage('error', data.msg || '请求失败');
-                    }
-                }
-            } catch (e) {
-                if (pendingBubble) {
-                    pendingBubble.className = 'openclaw-msg error';
-                    pendingBubble.textContent = '网络错误: ' + (e.message || e);
-                } else {
-                    appendOpenclawChatMessage('error', '网络错误: ' + (e.message || e));
-                }
-            }
-            if (btn) btn.disabled = false;
-        }
-        window.openOpenclawChatPanel = openOpenclawChatPanel;
-        window.closeOpenclawChatPanel = closeOpenclawChatPanel;
 
         // Guest Agent 离开房间
         function removeGuestSpriteByName(name) {
@@ -4281,7 +4763,7 @@ function toggleBrokerPanel() {
                         }
                     }
                 } catch (e) {
-                    console.warn('flowers 规格探测失败，使用默认 65x65', e);
+                    console.warn('flowers 规格探测失败，使用默认 128x128', e);
                 }
 
                 // Only fetch /assets/positions and /assets/defaults when user is authed,
@@ -4422,26 +4904,7 @@ function toggleBrokerPanel() {
             sofa.anims.stop();
             sofa.setTexture('sofa_idle');
 
-            // 牌匾：优先显示后端 /status 返回的 officeName（来自 OpenClaw IDENTITY.md），否则用 officeTitle 默认
-            const plaqueX = config.width / 2;
-            const plaqueY = config.height - 36;
-            const plaqueBg = game.add.rectangle(plaqueX, plaqueY, 420, 44, 0x5d4037);
-            plaqueBg.setStrokeStyle(3, 0x3e2723);
-            const plaqueText = game.add.text(plaqueX, plaqueY, t('officeTitle'), {
-                fontFamily: 'ArkPixel, monospace',
-                fontSize: '18px',
-                fill: '#ffd700',
-                fontWeight: '900',
-                fontStyle: 'bold',
-                stroke: '#000',
-                strokeThickness: 3,
-                wordWrap: { width: 400 },
-                align: 'center'
-            }).setOrigin(0.5);
-            // 牌匾两边加个小装饰（跟随牌匾居中）
-            game.add.text(plaqueX - 190, plaqueY, '⭐', { fontFamily: 'ArkPixel, monospace', fontSize: '20px' }).setOrigin(0.5);
-            game.add.text(plaqueX + 190, plaqueY, '⭐', { fontFamily: 'ArkPixel, monospace', fontSize: '20px' }).setOrigin(0.5);
-            window.officePlaqueText = plaqueText;
+            // 底部「办公室」铭牌已移除；对话/日记/装修入口为 HTML Canvas（placeOfficePlaqueToolbar）
 
             // Random plant at (565,178) (frame 0-15, 160x160 each)
             const plantFrameCount = 16;
@@ -4547,14 +5010,7 @@ function toggleBrokerPanel() {
             // Desk at (218,417) (v2) — 点击打开右侧与本地小龙虾的聊天面板
             const desk = this.add.image(218, 417, 'desk_v2').setOrigin(0.5);
             desk.setDepth(1001);  // desk above starWorking
-            desk.setInteractive({
-                useHandCursor: true,
-                hitArea: new Phaser.Geom.Rectangle(-140, -110, 280, 220),
-                hitAreaCallback: Phaser.Geom.Rectangle.Contains
-            });
-            desk.on('pointerdown', function () {
-                if (typeof window.openOpenclawChatPanel === 'function') window.openOpenclawChatPanel();
-            });
+            // 对话入口在右上角「对话」图标，办公桌不再绑定点击
 
             // Random flower pot at (310,390), default scale 0.8 (top layer)
             const flowerFrameCount = Math.max(1, FLOWERS_FRAME_COLS * FLOWERS_FRAME_ROWS); // 动态帧数
@@ -4630,6 +5086,8 @@ function toggleBrokerPanel() {
 
             statusText = document.getElementById('status-text');
             placeOverlayAndStatusAtCanvasBottomLeft();
+            if (typeof drawOfficePlaqueToolbar === 'function') drawOfficePlaqueToolbar();
+            if (typeof placeOfficePlaqueToolbar === 'function') placeOfficePlaqueToolbar();
             window.addEventListener('resize', placeOverlayAndStatusAtCanvasBottomLeft);
             window.addEventListener('scroll', placeOverlayAndStatusAtCanvasBottomLeft, { passive: true });
             coordsOverlay = document.getElementById('coords-overlay');
@@ -4823,6 +5281,22 @@ function toggleBrokerPanel() {
                 coordsOverlay.style.top = (pointer.y + 18) + 'px';
             });
 
+            // 嵌入主应用 iframe 时父容器宽度会小于 1280：监听尺寸变化以刷新 Phaser 缩放，避免画面被横向裁切
+            try {
+                const gc = document.getElementById('game-container');
+                if (gc && typeof ResizeObserver !== 'undefined') {
+                    const ro = new ResizeObserver(() => {
+                        try {
+                            if (game && game.scale) game.scale.refresh();
+                            if (typeof placeOverlayAndStatusAtCanvasBottomLeft === 'function') {
+                                placeOverlayAndStatusAtCanvasBottomLeft();
+                            }
+                        } catch (e) {}
+                    });
+                    ro.observe(gc);
+                }
+            } catch (e) {}
+
             // 加载昨日 memo
             loadMemo();
 
@@ -4896,6 +5370,7 @@ function toggleBrokerPanel() {
             if (typewriterIndex < typewriterTarget.length && time - lastTypewriter > TYPEWRITER_DELAY) {
                 typewriterText += typewriterTarget[typewriterIndex];
                 statusText.textContent = typewriterText;
+                syncOpenclawStatusLineFromGame();
                 typewriterIndex++;
                 lastTypewriter = time;
             }
@@ -5019,9 +5494,6 @@ function toggleBrokerPanel() {
                     try {
                         if (data.officeName) {
                             window.officeNameFromServer = data.officeName;
-                            if (window.officePlaqueText && window.officePlaqueText.setText) {
-                                window.officePlaqueText.setText(data.officeName);
-                            }
                         }
                         const nextState = normalizeState(data.state);
                         const stateInfo = STATES[nextState] || STATES.idle;

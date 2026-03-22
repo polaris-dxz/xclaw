@@ -33,6 +33,7 @@
             overflow: hidden !important;
         }
         body.asset-window-mode #window-controls,
+        body.asset-window-mode #status-fab-wrap,
         body.asset-window-mode #status-fab,
         body.asset-window-mode #loading-overlay,
         body.asset-window-mode #main-stage,
@@ -104,6 +105,7 @@
             box-shadow: none !important;
         }
         body.desktop-shell #bottom-panels {
+            display: none !important;
             width: var(--desktop-game-width) !important;
             max-width: var(--desktop-game-width) !important;
             flex-direction: row !important;
@@ -183,27 +185,94 @@
         body.desktop-shell #status-text {
             display: none !important;
         }
-        #status-fab {
+        #status-fab-wrap {
             display: none;
         }
-        body.desktop-shell #status-fab {
+        body.desktop-shell #status-fab-wrap {
             display: block;
             position: fixed;
             top: calc(env(safe-area-inset-top, 0px) + 10px);
             left: 50%;
             transform: translateX(-50%);
             z-index: 1000001;
+            pointer-events: auto;
+        }
+        body.desktop-shell #status-fab {
+            display: flex;
+            align-items: center;
+            gap: 8px;
             max-width: min(62vw, 520px);
-            padding: 6px 12px;
-            border-radius: 8px;
-            background: rgba(0, 0, 0, 0.72);
-            color: #eee;
+            padding: 8px 14px;
+            border-radius: 10px;
+            background: #faf8f3;
+            border: 2px solid #5d4037;
+            color: #1a1a1a;
             font-size: 12px;
-            line-height: 1.25;
+            line-height: 1.3;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+            box-shadow: 0 2px 8px rgba(0,0,0,.12);
+        }
+        body.desktop-shell #status-fab:focus {
+            outline: 2px solid #e94560;
+            outline-offset: 2px;
+        }
+        .status-fab-emoji {
+            flex-shrink: 0;
+            font-size: 20px;
+            line-height: 1;
+        }
+        .status-fab-line {
+            flex: 1;
+            min-width: 0;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            pointer-events: none;
+            text-align: left;
+        }
+        .status-fab-caret {
+            flex-shrink: 0;
+            font-size: 10px;
+            opacity: 0.75;
+        }
+        #status-fab-menu {
+            display: none;
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            top: calc(100% + 6px);
+            min-width: 100%;
+            padding: 4px;
+            border-radius: 8px;
+            background: #faf8f3;
+            border: 2px solid #5d4037;
+            box-shadow: 0 8px 24px rgba(0,0,0,.22);
+            flex-direction: column;
+            gap: 2px;
+            z-index: 2;
+        }
+        #status-fab-wrap.open #status-fab-menu {
+            display: flex;
+        }
+        .status-fab-menu-item {
+            font-family: 'ArkPixel', 'Courier New', monospace;
+            font-size: 13px;
+            padding: 10px 16px;
+            margin: 0;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: #3e2723;
+            cursor: pointer;
+            text-align: center;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .status-fab-menu-item:hover,
+        .status-fab-menu-item:focus-visible {
+            background: rgba(233, 69, 96, 0.15);
+            outline: none;
         }
         body.desktop-shell #loading-overlay {
             background: rgba(0, 0, 0, 0.18) !important;
@@ -403,15 +472,17 @@
         /* 底部面板容器 */
         #main-stage {
             position: relative;
-            width: 1280px;
+            width: 100%;
+            max-width: 1280px;
             transition: margin-left .25s ease;
             will-change: margin-left;
         }
         body.drawer-open #main-stage {
             margin-left: 0 !important;
         }
+        /* 与浏览器版 index.html 对齐：默认隐藏三栏，由脚本/桌面壳控制时可再显示 */
         #bottom-panels {
-            display: flex;
+            display: none !important;
             gap: 20px;
             width: 1280px;
             max-width: none;
@@ -422,11 +493,11 @@
             position: relative;
             border: 0;
             image-rendering: pixelated;
-            width: 1280px;
-            height: 720px;
-            max-width: none;
+            width: 100%;
+            max-width: 1280px;
+            height: auto;
+            aspect-ratio: 1280 / 720;
             max-height: none;
-            aspect-ratio: auto;
             overflow: hidden;
         }
         #game-container canvas {
@@ -491,26 +562,36 @@
             text-overflow: ellipsis;
             line-height: 1.2;
         }
+        /* 与浏览器版 index.html 一致：底部三按钮（对话/日记/装修）为 HTML Canvas，取代原文字铭牌 */
         #office-plaque-dom {
+            display: none;
+        }
+        #office-plaque-toolbar {
             position: absolute;
             left: 50%;
-            bottom: 14px;
-            transform: translateX(-50%);
-            display: inline-flex;
-            align-items: center;
-            gap: 14px;
-            padding: 6px 12px;
-            border: 2px solid #3e2723;
-            background: #5d4037;
-            color: #ffd700;
-            font-family: 'ArkPixel', 'Courier New', monospace;
-            font-size: 13px;
-            line-height: 1;
-            text-shadow: 0 1px 0 #000, 0 0 1px #000;
-            z-index: 35;
+            top: calc(100% * 684 / 720);
+            transform: translate(-50%, -50%);
+            width: calc(100% * 108 / 1280);
+            min-width: 88px;
+            max-width: 200px;
+            aspect-ratio: 108 / 44;
+            height: auto;
+            box-sizing: border-box;
+            z-index: 55;
+            pointer-events: none;
+            display: none;
+        }
+        #office-plaque-toolbar canvas {
             pointer-events: auto;
-            white-space: nowrap;
-            cursor: text;
+            cursor: pointer;
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+        body.desktop-shell #office-plaque-toolbar {
+            display: none !important;
         }
         #office-plaque-text {
             font-size: 13px;
@@ -1598,7 +1679,18 @@
         <button id="btn-minimize-mode" class="traffic-btn min" title="最小化模式"></button>
         <button id="btn-open-frontend" class="traffic-btn max" title="回到前端界面"></button>
     </div>
-    <div id="status-fab">加载中...</div>
+    <div id="status-fab-wrap">
+        <div id="status-fab" role="button" tabindex="0" aria-expanded="false" aria-haspopup="true" aria-controls="status-fab-menu">
+            <span class="status-fab-emoji" aria-hidden="true">🦞</span>
+            <span id="status-fab-line" class="status-fab-line">加载中...</span>
+            <span class="status-fab-caret" aria-hidden="true">▾</span>
+        </div>
+        <div id="status-fab-menu" role="menu" aria-label="快捷操作">
+            <button type="button" class="status-fab-menu-item" role="menuitem" data-action="chat">对话</button>
+            <button type="button" class="status-fab-menu-item" role="menuitem" data-action="memo">日记</button>
+            <button type="button" class="status-fab-menu-item" role="menuitem" data-action="decor">装修</button>
+        </div>
+    </div>
     <!-- 加载遮罩 -->
     <div id="loading-overlay">
         <div id="loading-text">Loading Star’s pixel office...</div>
@@ -1610,10 +1702,13 @@
     <div id="main-stage">
         <div id="game-container">
             <div id="status-text">加载中...</div>
-            <div id="office-plaque-dom">
+            <div id="office-plaque-dom" aria-hidden="true">
                 <span class="office-plaque-star">⭐</span>
                 <span id="office-plaque-text">我的办公室</span>
                 <span class="office-plaque-star">⭐</span>
+            </div>
+            <div id="office-plaque-toolbar" role="toolbar" aria-label="工作室快捷操作">
+                <canvas id="office-plaque-canvas" width="108" height="36" aria-hidden="true"></canvas>
             </div>
         </div>
     
@@ -1803,7 +1898,8 @@
                 authNeedInput: '请输入验证码', authPassOk: '验证通过', authPassWrong: '验证码错误',
                 stateDetailIdle: '待命', stateDetailWriting: '整理文档', stateDetailResearching: '搜索信息', stateDetailExecuting: '执行任务', stateDetailSyncing: '同步备份', stateDetailError: '出错了',
                 stateLabelIdle: '待命', stateLabelWriting: '整理文档', stateLabelResearching: '搜索信息', stateLabelExecuting: '执行任务', stateLabelSyncing: '同步备份', stateLabelError: '出错了',
-                statusBrokerDecorating: '正在处理中介装修方案', statusMovingHome: '正在搬新家', statusRestoreHome: '正在回老家', statusRestoreLastBg: '正在回退到上一次背景', statusApplyFavorite: '正在替换收藏地图'
+                statusBrokerDecorating: '正在处理中介装修方案', statusMovingHome: '正在搬新家', statusRestoreHome: '正在回老家', statusRestoreLastBg: '正在回退到上一次背景', statusApplyFavorite: '正在替换收藏地图',
+                statusMenuChat: '对话', statusMenuMemo: '日记', statusMenuDecor: '装修'
             },
             en: {
                 controlTitle: 'Star Status',
@@ -1838,7 +1934,8 @@
                 authNeedInput: 'Please enter passcode', authPassOk: 'Passcode verified', authPassWrong: 'Wrong passcode',
                 stateDetailIdle: 'Standby', stateDetailWriting: 'Organizing Docs', stateDetailResearching: 'Researching', stateDetailExecuting: 'Executing Tasks', stateDetailSyncing: 'Syncing Backup', stateDetailError: 'Error',
                 stateLabelIdle: 'Standby', stateLabelWriting: 'Organizing Docs', stateLabelResearching: 'Researching', stateLabelExecuting: 'Executing Tasks', stateLabelSyncing: 'Syncing Backup', stateLabelError: 'Error',
-                statusBrokerDecorating: 'Applying broker decoration plan', statusMovingHome: 'Moving to a new home', statusRestoreHome: 'Restoring home background', statusRestoreLastBg: 'Restoring previous generated background', statusApplyFavorite: 'Applying favorite map'
+                statusBrokerDecorating: 'Applying broker decoration plan', statusMovingHome: 'Moving to a new home', statusRestoreHome: 'Restoring home background', statusRestoreLastBg: 'Restoring previous generated background', statusApplyFavorite: 'Applying favorite map',
+                statusMenuChat: 'Chat', statusMenuMemo: 'Diary', statusMenuDecor: 'Decorate'
             },
             ja: {
                 controlTitle: 'Star ステータス',
@@ -1873,11 +1970,72 @@
                 authNeedInput: 'パスコードを入力してください', authPassOk: '認証に成功しました', authPassWrong: 'パスコードが正しくありません',
                 stateDetailIdle: '待機', stateDetailWriting: '文書整理', stateDetailResearching: '情報検索', stateDetailExecuting: 'タスク実行', stateDetailSyncing: '同期バックアップ', stateDetailError: 'エラー発生',
                 stateLabelIdle: '待機', stateLabelWriting: '文書整理', stateLabelResearching: '情報検索', stateLabelExecuting: 'タスク実行', stateLabelSyncing: '同期バックアップ', stateLabelError: 'エラー発生',
-                statusBrokerDecorating: '仲介の装飾プランを処理中', statusMovingHome: '引っ越し中', statusRestoreHome: 'ホーム背景を復元中', statusRestoreLastBg: '前回背景へ復元中', statusApplyFavorite: '保存したマップを適用中'
+                statusBrokerDecorating: '仲介の装飾プランを処理中', statusMovingHome: '引っ越し中', statusRestoreHome: 'ホーム背景を復元中', statusRestoreLastBg: '前回背景へ復元中', statusApplyFavorite: '保存したマップを適用中',
+                statusMenuChat: '対話', statusMenuMemo: '日記', statusMenuDecor: '装飾'
             }
         };
 
         function t(key) { return (I18N[uiLang] && I18N[uiLang][key]) || key; }
+        function refreshStatusFabMenuLabels() {
+            const chat = document.querySelector('#status-fab-menu [data-action="chat"]');
+            const memo = document.querySelector('#status-fab-menu [data-action="memo"]');
+            const decor = document.querySelector('#status-fab-menu [data-action="decor"]');
+            if (chat) chat.textContent = t('statusMenuChat');
+            if (memo) memo.textContent = t('statusMenuMemo');
+            if (decor) decor.textContent = t('statusMenuDecor');
+        }
+        function initStatusFabMenu() {
+            const wrap = document.getElementById('status-fab-wrap');
+            const fab = document.getElementById('status-fab');
+            const menu = document.getElementById('status-fab-menu');
+            if (!wrap || !fab || !menu) return;
+            if (fab.dataset.menuBound === '1') return;
+            fab.dataset.menuBound = '1';
+
+            function setOpen(open) {
+                wrap.classList.toggle('open', open);
+                fab.setAttribute('aria-expanded', open ? 'true' : 'false');
+            }
+
+            fab.addEventListener('click', (e) => {
+                e.stopPropagation();
+                setOpen(!wrap.classList.contains('open'));
+            });
+            fab.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setOpen(!wrap.classList.contains('open'));
+                } else if (e.key === 'Escape') {
+                    setOpen(false);
+                }
+            });
+            document.addEventListener('click', () => setOpen(false));
+            wrap.addEventListener('click', (e) => e.stopPropagation());
+
+            menu.querySelectorAll('[data-action]').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const a = btn.getAttribute('data-action');
+                    setOpen(false);
+                    if (a === 'chat') {
+                        if (typeof openFrontendForChatFromPlaque === 'function') openFrontendForChatFromPlaque();
+                    } else if (a === 'memo') {
+                        if (DESKTOP_MODE && window.__TAURI__?.core) {
+                            const url = new URL('/', window.location.origin);
+                            url.searchParams.set('focus', 'memo');
+                            window.__TAURI__.core.invoke('open_external_url', { url: url.toString() }).catch(() => {
+                                window.open(url.toString(), '_blank', 'noopener,noreferrer');
+                            });
+                        } else if (typeof toggleMemoPanelFromPlaqueToolbar === 'function') {
+                            toggleMemoPanelFromPlaqueToolbar();
+                        }
+                    } else if (a === 'decor' && typeof toggleAssetDrawer === 'function') {
+                        void toggleAssetDrawer();
+                    }
+                });
+            });
+            refreshStatusFabMenuLabels();
+        }
         function getOfficePlaqueTitle() {
             return (window.officeNameFromServer || officePlaqueCustomTitle || t('officeTitle'));
         }
@@ -2054,6 +2212,7 @@
             refreshOfficePlaqueTitle();
 
             refreshCollapsiblePanelTitles();
+            refreshStatusFabMenuLabels();
 
             const coordsBtn = document.getElementById('coords-toggle');
             if (coordsBtn) coordsBtn.textContent = showCoords ? t('hideCoords') : t('showCoords');
@@ -2314,6 +2473,7 @@
                     updateTitle();
                     queueDesktopResize();
                     syncElectronWindowMode();
+                    if (typeof drawOfficePlaqueToolbar === 'function') drawOfficePlaqueToolbar();
                     setTimeout(queueDesktopResize, 260);
                     setTimeout(syncElectronWindowMode, 260);
                 });
@@ -2477,6 +2637,8 @@
         let FLOWERS_FRAME_ROWS = 4;
         let currentOfficeBgTextureKey = 'office_bg';
         let assetDrawerOpen = false;
+        /** 像素三键高亮；日记按钮同时看 #memo-panel 是否展开 */
+        let studioRailActive = null;
         let assetDrawerAuthed = false;
         let assetManualPanelOpen = false;
         let assetFilterMode = 'all';
@@ -2487,6 +2649,164 @@
         let assetThumbTimers = [];
         let homeFavoritesCache = [];
         let homeFavoritesLoadedAt = 0;
+
+        function placeOfficePlaqueToolbar() {
+            const wrap = document.getElementById('office-plaque-toolbar');
+            const gc = document.getElementById('game-container');
+            if (!wrap || !gc) return;
+            const ready = !!(typeof game !== 'undefined' && game && game.canvas);
+            wrap.style.display = ready ? 'block' : 'none';
+        }
+
+        function blitPattern8(ctx, x0, y0, pat, scale, color) {
+            for (let py = 0; py < 8; py++) {
+                for (let px = 0; px < 8; px++) {
+                    if (pat[py * 8 + px]) {
+                        ctx.fillStyle = color;
+                        ctx.fillRect(x0 + px * scale, y0 + py * scale, scale, scale);
+                    }
+                }
+            }
+        }
+
+        function drawOfficePlaqueToolbar() {
+            const c = document.getElementById('office-plaque-canvas');
+            if (!c) return;
+            const ctx = c.getContext('2d');
+            if (!ctx) return;
+            ctx.imageSmoothingEnabled = false;
+            const W = c.width;
+            const H = c.height;
+            ctx.clearRect(0, 0, W, H);
+
+            const chatOn = studioRailActive === 'chat';
+            const memoPanel = document.getElementById('memo-panel');
+            const memoOn = !!(memoPanel && !memoPanel.classList.contains('collapsed'));
+            const decorOn = !!assetDrawerOpen;
+
+            const btnW = 32;
+            const gap = 6;
+            const y0 = 2;
+            const x0s = [0, btnW + gap, (btnW + gap) * 2];
+            const S = 2;
+
+            const chatPat = [
+                0,0,1,1,1,1,0,0,
+                0,1,1,1,1,1,1,0,
+                1,1,1,1,1,1,1,1,
+                1,1,1,1,1,1,1,1,
+                1,1,1,1,1,1,1,1,
+                0,1,1,1,1,1,1,0,
+                0,0,1,1,1,1,0,0,
+                0,0,0,0,0,0,0,0
+            ];
+            const memoPat = [
+                0,1,1,1,1,1,1,0,
+                1,1,1,1,1,1,1,1,
+                1,0,0,0,0,0,0,1,
+                1,0,1,1,1,1,0,1,
+                1,0,1,1,1,1,0,1,
+                1,0,0,0,0,0,0,1,
+                1,1,1,1,1,1,1,1,
+                0,1,1,1,1,1,1,0
+            ];
+            const decorPat = [
+                0,0,0,1,1,0,0,0,
+                0,0,1,1,1,1,0,0,
+                0,1,1,1,1,1,1,0,
+                1,1,1,1,1,1,1,1,
+                1,1,1,1,1,1,1,1,
+                0,1,0,1,0,1,0,1,
+                0,1,0,1,0,1,0,1,
+                0,0,0,0,0,0,0,0
+            ];
+
+            const drawBtn = (xi, active, pat, iconColor) => {
+                const x = x0s[xi];
+                const border = active ? '#3e2723' : '#2a1f18';
+                const face = active ? '#e94560' : '#4a4a4a';
+                const hi = active ? '#ff6b7a' : '#6a6a6a';
+                const lo = active ? '#c93652' : '#3a3a3a';
+                ctx.fillStyle = border;
+                ctx.fillRect(x, y0, btnW, btnW);
+                ctx.fillStyle = face;
+                ctx.fillRect(x + 1, y0 + 1, btnW - 2, btnW - 2);
+                ctx.fillStyle = hi;
+                ctx.fillRect(x + 2, y0 + 2, btnW - 4, 2);
+                ctx.fillStyle = lo;
+                ctx.fillRect(x + 2, y0 + btnW - 4, btnW - 4, 2);
+                blitPattern8(ctx, x + 8, y0 + 8, pat, S, iconColor);
+            };
+
+            drawBtn(0, chatOn, chatPat, '#ffd54f');
+            drawBtn(1, memoOn, memoPat, '#fff8e1');
+            drawBtn(2, decorOn, decorPat, '#ffd54f');
+        }
+
+        function setStudioRailActive(which) {
+            studioRailActive = which;
+            drawOfficePlaqueToolbar();
+        }
+
+        function toggleMemoPanelFromPlaqueToolbar() {
+            const panel = document.getElementById('memo-panel');
+            if (!panel) return;
+            panel.classList.toggle('collapsed');
+            refreshCollapsiblePanelTitles();
+            queueDesktopResize();
+            syncDesktopWindowSize();
+            setTimeout(() => {
+                queueDesktopResize();
+                syncDesktopWindowSize();
+            }, 260);
+            drawOfficePlaqueToolbar();
+        }
+
+        function openFrontendForChatFromPlaque() {
+            const url = new URL('/', window.location.origin).toString();
+            if (DESKTOP_MODE && window.__TAURI__?.core) {
+                window.__TAURI__.core.invoke('open_external_url', { url }).catch(() => {
+                    window.open(url, '_blank', 'noopener,noreferrer');
+                });
+            } else {
+                window.open(url, '_blank', 'noopener,noreferrer');
+            }
+            drawOfficePlaqueToolbar();
+        }
+
+        function bindOfficePlaqueCanvas() {
+            const c = document.getElementById('office-plaque-canvas');
+            if (!c || c.dataset.bound === '1') return;
+            c.dataset.bound = '1';
+            c.addEventListener('click', (e) => {
+                const rect = c.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const w = rect.width;
+                const seg = w / 3;
+                const i = Math.min(2, Math.floor(x / seg));
+                if (i === 0) openFrontendForChatFromPlaque();
+                else if (i === 1) toggleMemoPanelFromPlaqueToolbar();
+                else if (typeof toggleAssetDrawer === 'function') void toggleAssetDrawer();
+            });
+            c.addEventListener('mousemove', (e) => {
+                const rect = c.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const w = rect.width;
+                const seg = w / 3;
+                const i = Math.min(2, Math.floor(x / seg));
+                const tips = window._studioTips || { chat: '对话', memo: '日记', decor: '装修' };
+                c.title = [tips.chat, tips.memo, tips.decor][i] || '';
+            });
+        }
+        function initOfficePlaqueAndStatusMenu() {
+            bindOfficePlaqueCanvas();
+            initStatusFabMenu();
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initOfficePlaqueAndStatusMenu);
+        } else {
+            initOfficePlaqueAndStatusMenu();
+        }
 
         // 坐标以服务端为准；清理历史本地缓存，避免把素材挪飞
         let assetPositionOverrides = {};
@@ -5163,11 +5483,20 @@ function toggleBrokerPanel() {
 
             statusText = document.getElementById('status-text');
             if (DESKTOP_MODE) {
-                statusText = document.getElementById('status-fab') || statusText;
+                const lineEl = document.getElementById('status-fab-line');
+                statusText = lineEl || document.getElementById('status-fab') || statusText;
             }
             placeOverlayAndStatusAtCanvasBottomLeft();
-            window.addEventListener('resize', placeOverlayAndStatusAtCanvasBottomLeft);
-            window.addEventListener('scroll', placeOverlayAndStatusAtCanvasBottomLeft, { passive: true });
+            if (typeof drawOfficePlaqueToolbar === 'function') drawOfficePlaqueToolbar();
+            if (typeof placeOfficePlaqueToolbar === 'function') placeOfficePlaqueToolbar();
+            window.addEventListener('resize', () => {
+                placeOverlayAndStatusAtCanvasBottomLeft();
+                if (typeof placeOfficePlaqueToolbar === 'function') placeOfficePlaqueToolbar();
+            });
+            window.addEventListener('scroll', () => {
+                placeOverlayAndStatusAtCanvasBottomLeft();
+                if (typeof placeOfficePlaqueToolbar === 'function') placeOfficePlaqueToolbar();
+            }, { passive: true });
             coordsOverlay = document.getElementById('coords-overlay');
             coordsDisplay = document.getElementById('coords-display');
             coordsToggle = document.getElementById('coords-toggle');
@@ -5241,6 +5570,7 @@ function toggleBrokerPanel() {
                 game.scale.on('resize', () => {
                     applyMobileCameraFit();
                     placeOverlayAndStatusAtCanvasBottomLeft();
+                    if (typeof placeOfficePlaqueToolbar === 'function') placeOfficePlaqueToolbar();
                 });
             }
 
@@ -5432,7 +5762,7 @@ function toggleBrokerPanel() {
             }
 
             // 打字机效果
-            if (typewriterIndex < typewriterTarget.length && time - lastTypewriter > TYPEWRITER_DELAY) {
+            if (statusText && typewriterIndex < typewriterTarget.length && time - lastTypewriter > TYPEWRITER_DELAY) {
                 typewriterText += typewriterTarget[typewriterIndex];
                 statusText.textContent = typewriterText;
                 typewriterIndex++;
