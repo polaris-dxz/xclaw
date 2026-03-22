@@ -3,10 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "main": "main.js",
+  "dependencies": {
+    "electron-updater": "^6.6.2"
+  },
   "scripts": {
     "dev": "wait-on http://127.0.0.1:20263 && env -u ELECTRON_RUN_AS_NODE -u CURSOR_CLI electron .",
-    "build": "electron-builder --config electron-builder.json",
-    "pack": "electron-builder --config electron-builder.json --dir"
+    "prepare:openclaw-runtime": "npm --prefix openclaw-runtime install --omit=dev --registry=https://registry.npmjs.org",
+    "build": "npm run prepare:openclaw-runtime && electron-builder --config electron-builder.json",
+    "pack": "npm run prepare:openclaw-runtime && electron-builder --config electron-builder.json --dir"
   },
   "devDependencies": {
     "electron": "^33.0.0",
