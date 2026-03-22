@@ -1,11 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useXClawStore, type Agent } from '@/store'
 import { OrchestrationBar } from './orchestration-bar'
+import { useSmartPoll } from '@/lib/use-smart-poll'
+import { extractWsHost } from '@/lib/agent-card-helpers'
 
 type AgentDetails = Agent & {
   soul_content?: string
@@ -35,11 +37,20 @@ type DiagnosticsData = {
 }
 
 type TabKey = 'overview' | 'tasks' | 'activity' | 'tools' | 'channels' | 'cron' | 'models' | 'soul' | 'memory' | 'files'
+type GatewayLite = {
+  id: number
+  name: string
+  host: string
+  port: number
+  is_primary: number
+}
 
 export function AgentSquadPanelPhase3() {
-  const { agents, setAgents } = useXClawStore()
+  const { agents, setAgents, connection } = useXClawStore()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [gatewayPrimary, setGatewayPrimary] = useState<GatewayLite | null>(null)
+  const [gatewayHint, setGatewayHint] = useState<string | null>(null)
   const [selected, setSelected] = useState<AgentDetails | null>(null)
   const [tab, setTab] = useState<TabKey>('overview')
   const [soul, setSoul] = useState('')
@@ -54,6 +65,10 @@ export function AgentSquadPanelPhase3() {
   const [continuePrompt, setContinuePrompt] = useState('')
   const [continueReply, setContinueReply] = useState('')
   const [diagHours, setDiagHours] = useState(72)
+  const [autoRefresh, setAutoRefresh] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  const [syncToast, setSyncToast] = useState<string | null>(null)
+  const [showHidden, setShowHidden] = useState(false)
   const [cronDraft, setCronDraft] = useState({
     name: '',
     schedule: '*/30 * * * *',
@@ -61,12 +76,18 @@ export function AgentSquadPanelPhase3() {
     model: 'sonnet',
   })
 
-  const loadAgents = async () => {
-    setLoading(true)
+  const loadAgents = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = options?.silent === true
+    if (!silent) setLoading(true)
     setError(null)
     try {
-      const response = await fetch('/api/agents?limit=200', { cache: 'no-store' })
-      const data = await response.json()
+      const url = showHidden ? '/api/agents?limit=200&show_hidden=true' : '/api/agents?limit=200'
+      const response = await fetch(url, { cache: 'no-store' })
+      if (response.status === 401) {
+        window.location.assign('/login?next=%2Fsettings%2Fagents')
+        return
+      }
+      const data = await response.json().catch(() => ({}))
       if (!response.ok) {
         setError(data?.error || '加载智能体失败')
         return
@@ -75,13 +96,70 @@ export function AgentSquadPanelPhase3() {
     } catch {
       setError('网络异常，加载智能体失败')
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
-  }
+  }, [setAgents, showHidden])
+
+  const loadGatewaySummary = useCallback(async () => {
+    try {
+      const response = await fetch('/api/gateways', { cache: 'no-store' })
+      if (!response.ok) return
+      const data = await response.json().catch(() => ({}))
+      const list = Array.isArray(data?.gateways) ? data.gateways as GatewayLite[] : []
+      const primary = list.find((item) => Number(item.is_primary) === 1) || null
+      setGatewayPrimary(primary)
+      if (!primary) {
+        setGatewayHint('未检测到主网关')
+        return
+      }
+      const originTag = Number(primary.port) === 20064 ? '内置' : '外部'
+      setGatewayHint(`${originTag} ${primary.host}:${primary.port}`)
+    } catch {
+      setGatewayHint('主网关信息读取失败')
+    }
+  }, [])
 
   useEffect(() => {
-    if (agents.length === 0) void loadAgents()
-  }, [])
+    void loadAgents()
+    void loadGatewaySummary()
+  }, [loadAgents, loadGatewaySummary])
+
+  useSmartPoll(() => loadAgents({ silent: true }), 30000, {
+    enabled: autoRefresh,
+    pauseWhenSseConnected: true,
+  })
+  useSmartPoll(() => loadGatewaySummary(), 30000, {
+    enabled: autoRefresh,
+    pauseWhenSseConnected: true,
+  })
+
+  const syncFromConfig = async (source?: 'local') => {
+    setSyncing(true)
+    setSyncToast(null)
+    try {
+      const url = source === 'local' ? '/api/agents/sync?source=local' : '/api/agents/sync'
+      const response = await fetch(url, { method: 'POST' })
+      if (response.status === 401) {
+        window.location.assign('/login?next=%2Fsettings%2Fagents')
+        return
+      }
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(data?.error || '同步失败')
+      }
+      const toast = source === 'local'
+        ? (data?.message || '本地智能体同步完成')
+        : `同步完成：新增 ${data?.created || 0}，更新 ${data?.updated || 0}`
+      setSyncToast(toast)
+      await loadAgents({ silent: true })
+      setTimeout(() => setSyncToast(null), 5000)
+    } catch (err: any) {
+      setSyncToast(`同步失败：${err?.message || '未知错误'}`)
+      setTimeout(() => setSyncToast(null), 5000)
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   const statusCount = useMemo(() => {
     return agents.reduce<Record<string, number>>((acc, item) => {
@@ -167,7 +245,7 @@ export function AgentSquadPanelPhase3() {
       await fetch('/api/agents', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: agent.name, status }),
+        body: JSON.stringify({ name: agent.name, status, last_activity: `Status changed to ${status}` }),
       })
       await loadAgents()
     } catch {
@@ -395,18 +473,51 @@ export function AgentSquadPanelPhase3() {
     <div className="h-full flex flex-col">
       <OrchestrationBar />
       <div className="p-4 flex items-center justify-between border-b border-border">
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <span>idle {statusCount.idle || 0}</span>
           <span>busy {statusCount.busy || 0}</span>
           <span>offline {statusCount.offline || 0}</span>
           <span>error {statusCount.error || 0}</span>
+          <span className="text-border">|</span>
+          <span>主网关 {gatewayHint || '加载中...'}</span>
+          <Badge variant={connection.isConnected ? 'default' : 'outline'}>
+            WS {connection.isConnected ? '已连接' : '未连接'}
+          </Badge>
+          <span>实连 {extractWsHost(connection.url)}</span>
         </div>
-        <Button size="sm" variant="outline" onClick={() => void loadAgents()} disabled={loading}>
-          刷新
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant={autoRefresh ? 'default' : 'outline'} onClick={() => setAutoRefresh((v) => !v)}>
+            {autoRefresh ? 'Live' : 'Manual'}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => void syncFromConfig()} disabled={syncing}>
+            {syncing ? '同步中...' : '同步配置'}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => void syncFromConfig('local')} disabled={syncing}>
+            同步本地
+          </Button>
+          <Button size="sm" variant={showHidden ? 'default' : 'outline'} onClick={() => setShowHidden((v) => !v)}>
+            {showHidden ? '显示中(含隐藏)' : '显示隐藏'}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => { void loadAgents(); void loadGatewaySummary() }} disabled={loading}>
+            刷新
+          </Button>
+        </div>
       </div>
 
-      {error && <p className="px-4 pt-2 text-sm text-destructive">{error}</p>}
+      {syncToast && (
+        <div className={`mx-4 mt-3 rounded border px-3 py-2 text-sm ${syncToast.includes('失败') ? 'border-destructive/40 text-destructive bg-destructive/5' : 'border-emerald-500/30 text-emerald-600 dark:text-emerald-400 bg-emerald-500/5'}`}>
+          {syncToast}
+        </div>
+      )}
+
+      {error && (
+        <div className="mx-4 mt-3 flex items-center justify-between rounded border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          <span>{error}</span>
+          <Button size="sm" variant="ghost" onClick={() => setError(null)}>
+            关闭
+          </Button>
+        </div>
+      )}
 
       <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 overflow-auto">
         {agents.map((agent) => (
