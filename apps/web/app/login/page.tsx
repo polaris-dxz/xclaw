@@ -45,6 +45,10 @@ export default function LoginPage() {
       const data = await response.json()
 
       if (!response.ok) {
+        if (data?.code === 'NO_USERS') {
+          router.replace('/setup')
+          return
+        }
         setError(data?.hint || data?.error || '登录失败')
         return
       }
