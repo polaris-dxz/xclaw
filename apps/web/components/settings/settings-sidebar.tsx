@@ -59,7 +59,7 @@ const menuGroups: MenuGroup[] = [
       { icon: ListTodo, label: '任务', href: '/settings/tasks' },
       { icon: MessageSquare, label: '聊天', href: '/settings/chats' },
       { icon: Radio, label: '频道', href: '/settings/channels' },
-      { icon: Zap, label: '技能', href: '/settings/skills' },
+      { icon: Zap, label: '技能广场', href: '/settings/skills' },
       { icon: Brain, label: '记忆', href: '/settings/memory' },
     ],
   },
@@ -94,6 +94,7 @@ const menuGroups: MenuGroup[] = [
       { icon: Users, label: '用户', href: '/settings/management/users' },
       { icon: FileSearch, label: '审计', href: '/settings/management/audit' },
       { icon: Network, label: '网关', href: '/settings/management/gateway' },
+      { icon: Brain, label: '模型', href: '/settings/management/models' },
       { icon: Puzzle, label: '集成', href: '/settings/management/integrations' },
       { icon: Bug, label: '调试', href: '/settings/management/debug' },
       { icon: Settings, label: '设置', href: '/settings/management/settings' },
@@ -124,8 +125,8 @@ export function SettingsSidebar() {
   }
   
   return (
-    <div className="w-56 h-full flex flex-col border-r border-border/50 bg-sidebar">
-      <ScrollArea className="flex-1 py-4">
+    <div className="flex h-full min-h-0 w-56 shrink-0 flex-col border-r border-border/50 bg-sidebar">
+      <ScrollArea className="h-full min-h-0 flex-1 py-4">
         {menuGroups.map((group, groupIndex) => (
           <div key={group.label || 'main'} className="mb-2">
             {group.label ? (
@@ -201,10 +202,9 @@ function MenuItemLink({
         <div
           className={cn(
             'flex items-center gap-3 px-3 py-2 mx-2 rounded-lg text-sm transition-all',
-            'hover:bg-sidebar-accent',
             isActive
-              ? 'bg-sidebar-primary text-sidebar-primary-foreground'
-              : 'text-sidebar-foreground'
+              ? 'bg-sidebar-primary text-sidebar-primary-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+              : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
           )}
         >
           <Icon className={cn('h-4 w-4', isActive && 'text-inherit')} />
