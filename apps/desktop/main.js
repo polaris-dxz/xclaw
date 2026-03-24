@@ -13,6 +13,10 @@ const GITHUB_RELEASE_REPO = 'xclaw'
 
 let electronAutoUpdater = null
 let pendingInstallUpdateInfo = null
+/** 主窗口引用（用于生命周期联动） */
+let mainWindow = null
+/** 豆包式「实时双语字幕」独立悬浮窗：与主窗体解耦，最小化主窗仍可显示 */
+let subtitleOverlayWindow = null
 const defaultStudioPort = 19101
 const embeddedGatewayHost = '127.0.0.1'
 const embeddedGatewayPort = 20064
@@ -25,6 +29,10 @@ let embeddedGatewayShutdownRequested = false
 let embeddedGatewayRestartTimer = null
 let studioPort = normalizePort(process.env.STUDIO_BACKEND_PORT)
 let studioBaseUrl = `http://127.0.0.1:${studioPort}`
+/** Rust selection-sidecar 子进程（系统划词 NDJSON → 本机 TCP） */
+let selectionSidecarProcess = null
+/** 与 sidecar 的 NDJSON 长连接 */
+let selectionSidecarSocket = null
 
 function normalizePort(value) {
   const parsed = Number.parseInt(String(value || ''), 10)
@@ -54,6 +62,10 @@ function resolveEmbeddedOpenClawPaths() {
   return {
     runtimeRoot,
     stateDir,
+    /**
+     * 内置插件目录的「落地副本」路径（真实文件，非软链）。OpenClaw 对 manifest 使用 rejectHardlinks，
+     */
+    embeddedBundledExtensionsDir: path.join(stateDir, 'extensions'),
     configPath: path.join(stateDir, 'openclaw.json'),
     metadataPath: path.join(stateDir, 'xclaw.json'),
     workspaceDir: path.join(stateDir, 'workspace'),
@@ -93,6 +105,141 @@ function normalizeStringArray(values) {
     result.push(value)
   }
   return result
+}
+
+function tryRealpathSync(dirPath) {
+  try {
+    return fs.realpathSync(dirPath)
+  } catch {
+    return dirPath
+  }
+}
+
+/**
+ * 把应用内 config/extensions 复制到 ~/.xclaw/extensions（dereference: 跟随软链拷贝内容）。
+ * 仅顶层目录软链无法通过 OpenClaw 的 manifest 安全校验（子路径仍会解析到 ~/.openclaw/extensions/...）。
+ */
+function ensureEmbeddedExtensionsCopy(paths) {
+  const dest = paths.embeddedBundledExtensionsDir
+  if (!fs.existsSync(paths.runtimeExtensionsDir)) {
+    return null
+  }
+  let srcResolved = paths.runtimeExtensionsDir
+  try {
+    srcResolved = fs.realpathSync(paths.runtimeExtensionsDir)
+  } catch {
+    /* */
+  }
+  try {
+    let srcStat
+    try {
+      srcStat = fs.statSync(srcResolved)
+    } catch {
+      return null
+    }
+    const stampPath = path.join(paths.stateDir, '.openclaw-bundled-extensions.stamp')
+    let needCopy = true
+    if (fs.existsSync(stampPath) && fs.existsSync(dest)) {
+      try {
+        const stamp = JSON.parse(fs.readFileSync(stampPath, 'utf8'))
+        if (Number(stamp.mtimeMs) === srcStat.mtimeMs && stamp.src === srcResolved) {
+          needCopy = false
+        }
+      } catch {
+        /* recopy */
+      }
+    }
+    if (needCopy) {
+      if (fs.existsSync(dest)) {
+        fs.rmSync(dest, { recursive: true, force: true })
+      }
+      fs.mkdirSync(paths.stateDir, { recursive: true })
+      fs.cpSync(srcResolved, dest, { recursive: true, dereference: true })
+      fs.writeFileSync(
+        stampPath,
+        `${JSON.stringify(
+          {
+            mtimeMs: srcStat.mtimeMs,
+            src: srcResolved,
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        )}\n`,
+      )
+      console.log('[openclaw] 已同步内置插件目录到', dest)
+    }
+    return dest
+  } catch (e) {
+    console.warn(`[openclaw] 复制内置 extensions 失败: ${e.message}`)
+    return tryRealpathSync(srcResolved)
+  }
+}
+
+function discoverEmbeddedPluginIds(pluginRoots) {
+  const ids = new Set()
+  for (const root of pluginRoots) {
+    if (!root || !fs.existsSync(root)) continue
+    let realRoot = root
+    try {
+      realRoot = fs.realpathSync(root)
+    } catch {
+      continue
+    }
+    let dirents
+    try {
+      dirents = fs.readdirSync(realRoot, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const ent of dirents) {
+      if (!ent.isDirectory()) continue
+      const manifestPath = path.join(realRoot, ent.name, 'openclaw.plugin.json')
+      if (!fs.existsSync(manifestPath)) continue
+      try {
+        const man = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+        const id = typeof man?.id === 'string' ? man.id.trim() : ''
+        if (id) ids.add(id)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return ids
+}
+
+function sanitizeEmbeddedOpenClawPluginsAndChannels(config, discoveredIds) {
+  if (discoveredIds && discoveredIds.size > 0) {
+    const rawAllow = Array.isArray(config.plugins.allow) ? config.plugins.allow : []
+    const filteredAllow = normalizeStringArray(
+      rawAllow.map((x) => String(x || '').trim()).filter((id) => discoveredIds.has(id)),
+    )
+    config.plugins.allow =
+      filteredAllow.length > 0
+        ? filteredAllow
+        : normalizeStringArray([...discoveredIds])
+    const nextEntries = {}
+    if (config.plugins.entries && typeof config.plugins.entries === 'object') {
+      for (const [k, v] of Object.entries(config.plugins.entries)) {
+        if (discoveredIds.has(k)) nextEntries[k] = v
+      }
+    }
+    config.plugins.entries = nextEntries
+  }
+
+  if (config.channels && typeof config.channels === 'object') {
+    const channelPlugin = {
+      qqbot: 'openclaw-qqbot',
+      wecom: 'wecom-openclaw-plugin',
+      weixin: 'openclaw-weixin',
+    }
+    for (const [chKey, pluginId] of Object.entries(channelPlugin)) {
+      if (!Object.prototype.hasOwnProperty.call(config.channels, chKey)) continue
+      if (!discoveredIds || discoveredIds.size === 0 || !discoveredIds.has(pluginId)) {
+        delete config.channels[chKey]
+      }
+    }
+  }
 }
 
 function buildDefaultOpenClawConfig(paths) {
@@ -229,9 +376,6 @@ function ensureEmbeddedOpenClawConfig(paths) {
     }
   }
 
-  // Preserve user channel config (qqbot, wecom, etc.). Do not reset channels on each launch —
-  // that would wipe ~/.xclaw/openclaw.json credentials written by Mission Control / 远控通道.
-
   if (!config.channels || typeof config.channels !== 'object') {
     config.channels = {}
   }
@@ -261,10 +405,10 @@ function ensureEmbeddedOpenClawConfig(paths) {
   if (!config.skills.load || typeof config.skills.load !== 'object') config.skills.load = {}
   const existingSkillDirs = Array.isArray(config.skills.load.extraDirs) ? config.skills.load.extraDirs : []
   config.skills.load.extraDirs = normalizeStringArray([
-    ...existingSkillDirs,
-    ...(fs.existsSync(paths.runtimeSkillsDir) ? [paths.runtimeSkillsDir] : []),
-    paths.skillsDir,
-    path.join(paths.workspaceDir, 'skills'),
+    ...existingSkillDirs.map(tryRealpathSync),
+    ...(fs.existsSync(paths.runtimeSkillsDir) ? [tryRealpathSync(paths.runtimeSkillsDir)] : []),
+    tryRealpathSync(paths.skillsDir),
+    tryRealpathSync(path.join(paths.workspaceDir, 'skills')),
   ])
 
   if (!config.plugins || typeof config.plugins !== 'object') config.plugins = {}
@@ -276,13 +420,15 @@ function ensureEmbeddedOpenClawConfig(paths) {
     config.plugins.entries = {}
   }
   if (!config.plugins.load || typeof config.plugins.load !== 'object') config.plugins.load = {}
-  const existingPluginPaths = Array.isArray(config.plugins.load.paths) ? config.plugins.load.paths : []
-  config.plugins.load.paths = normalizeStringArray(
-    [
-      ...existingPluginPaths,
-      ...(fs.existsSync(paths.runtimeExtensionsDir) ? [paths.runtimeExtensionsDir] : []),
-    ],
-  )
+  const bundled = ensureEmbeddedExtensionsCopy(paths)
+  const fallbackExt = fs.existsSync(paths.runtimeExtensionsDir)
+    ? tryRealpathSync(paths.runtimeExtensionsDir)
+    : null
+  const pluginRoots = bundled ? [bundled] : fallbackExt ? [fallbackExt] : []
+  config.plugins.load.paths = normalizeStringArray(pluginRoots)
+
+  const discoveredIds = discoverEmbeddedPluginIds(config.plugins.load.paths)
+  sanitizeEmbeddedOpenClawPluginsAndChannels(config, discoveredIds)
 
   syncExternalOpenClawAgentAuthProfiles(paths, 'main')
 
@@ -433,6 +579,140 @@ async function waitForPortListening(port, host = '127.0.0.1', attempts = 40, int
     await new Promise((resolve) => setTimeout(resolve, intervalMs))
   }
   return false
+}
+
+function resolveSelectionSidecarBinary() {
+  const name = process.platform === 'win32' ? 'selection-sidecar.exe' : 'selection-sidecar'
+  if (isDev) {
+    const candidate = path.join(
+      __dirname,
+      '..',
+      '..',
+      'native',
+      'selection-sidecar',
+      'target',
+      'release',
+      name,
+    )
+    if (fs.existsSync(candidate)) return candidate
+    return null
+  }
+  const candidate = path.join(process.resourcesPath, 'selection-sidecar', name)
+  if (fs.existsSync(candidate)) return candidate
+  return null
+}
+
+function connectSelectionSidecarSocket(port) {
+  if (selectionSidecarSocket) {
+    try {
+      selectionSidecarSocket.destroy()
+    } catch {
+      /* ignore */
+    }
+    selectionSidecarSocket = null
+  }
+  const socket = net.createConnection({ port, host: '127.0.0.1' }, () => {
+    console.log('[selection-sidecar] tcp connected')
+  })
+  selectionSidecarSocket = socket
+  let buf = ''
+  socket.on('data', (chunk) => {
+    buf += chunk.toString()
+    const parts = buf.split('\n')
+    buf = parts.pop() || ''
+    for (const line of parts) {
+      if (!line.trim()) continue
+      try {
+        const msg = JSON.parse(line)
+        if (msg.type === 'selection.changed') {
+          const t = typeof msg.text === 'string' ? msg.text : ''
+          const preview = t.slice(0, 120)
+          console.log(
+            `[selection-sidecar] selection: ${preview}${t.length > 120 ? '…' : ''}`,
+          )
+        } else if (msg.type === 'accessibility.permission' && msg.trusted === false) {
+          console.warn(
+            '[selection-sidecar] 未授予辅助功能权限：请在「系统设置 → 隐私与安全性 → 辅助功能」中启用 xclaw。',
+          )
+        }
+      } catch {
+        /* ignore malformed line */
+      }
+    }
+  })
+  socket.on('error', (err) => {
+    console.warn(`[selection-sidecar] socket: ${err.message}`)
+  })
+}
+
+function startSelectionSidecar() {
+  if (process.env.XCLAW_DISABLE_SELECTION_SIDECAR === '1') {
+    console.log('[selection-sidecar] disabled (XCLAW_DISABLE_SELECTION_SIDECAR=1)')
+    return
+  }
+  const binary = resolveSelectionSidecarBinary()
+  if (!binary) {
+    console.warn(
+      '[selection-sidecar] binary not found (run `cargo build --release` in native/selection-sidecar)',
+    )
+    return
+  }
+  const args = []
+  if (process.env.XCLAW_SELECTION_SIDECAR_MOCK === '1') {
+    args.push('--mock')
+  }
+  const child = spawn(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  selectionSidecarProcess = child
+  let stdoutBuf = ''
+  child.stdout.on('data', (chunk) => {
+    stdoutBuf += chunk.toString()
+    const lines = stdoutBuf.split('\n')
+    stdoutBuf = lines.pop() || ''
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      let msg
+      try {
+        msg = JSON.parse(trimmed)
+      } catch {
+        continue
+      }
+      if (msg.type === 'ready' && msg.port) {
+        connectSelectionSidecarSocket(msg.port)
+      }
+    }
+  })
+  child.stderr.on('data', (chunk) => {
+    process.stderr.write(`[selection-sidecar] ${chunk}`)
+  })
+  child.on('exit', (code) => {
+    selectionSidecarProcess = null
+    if (selectionSidecarSocket && !selectionSidecarSocket.destroyed) {
+      selectionSidecarSocket.destroy()
+    }
+    selectionSidecarSocket = null
+    console.log(`[selection-sidecar] process exited (${code})`)
+  })
+  child.on('error', (err) => {
+    console.error(`[selection-sidecar] failed to spawn: ${err.message}`)
+    selectionSidecarProcess = null
+  })
+}
+
+function stopSelectionSidecar() {
+  if (selectionSidecarSocket) {
+    try {
+      selectionSidecarSocket.destroy()
+    } catch {
+      /* ignore */
+    }
+    selectionSidecarSocket = null
+  }
+  if (!selectionSidecarProcess || selectionSidecarProcess.killed) {
+    return
+  }
+  selectionSidecarProcess.kill('SIGTERM')
+  selectionSidecarProcess = null
 }
 
 async function startEmbeddedOpenClaw() {
@@ -676,8 +956,49 @@ function initElectronUpdater() {
   }, 6 * 60 * 60 * 1000)
 }
 
+function closeSubtitleOverlayWindow() {
+  if (subtitleOverlayWindow && !subtitleOverlayWindow.isDestroyed()) {
+    subtitleOverlayWindow.close()
+  }
+  subtitleOverlayWindow = null
+}
+
+function createSubtitleOverlayWindow() {
+  if (subtitleOverlayWindow && !subtitleOverlayWindow.isDestroyed()) {
+    subtitleOverlayWindow.show()
+    subtitleOverlayWindow.focus()
+    return
+  }
+  const htmlPath = path.join(__dirname, 'subtitle-overlay.html')
+  subtitleOverlayWindow = new BrowserWindow({
+    width: 560,
+    height: 248,
+    minWidth: 380,
+    minHeight: 140,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: true,
+    show: false,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload-subtitle.js'),
+    },
+  })
+  subtitleOverlayWindow.loadFile(htmlPath)
+  subtitleOverlayWindow.once('ready-to-show', () => {
+    subtitleOverlayWindow.show()
+  })
+  subtitleOverlayWindow.on('closed', () => {
+    subtitleOverlayWindow = null
+  })
+}
+
 function createWindow() {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1000,
@@ -700,6 +1021,11 @@ function createWindow() {
 
   mainWindow.loadURL(startUrl)
 
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    closeSubtitleOverlayWindow()
+  })
+
   // 开发模式下打开开发者工具
   if (isDev) {
     mainWindow.webContents.openDevTools()
@@ -707,14 +1033,18 @@ function createWindow() {
 
   // 监听主题变化
   nativeTheme.on('updated', () => {
-    mainWindow.webContents.send('theme-changed', nativeTheme.shouldUseDarkColors ? 'dark' : 'light')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('theme-changed', nativeTheme.shouldUseDarkColors ? 'dark' : 'light')
+    }
   })
 }
 
 app.whenReady().then(async () => {
   await startEmbeddedOpenClaw()
   await startStudioBackend()
+  startSelectionSidecar()
   installMacApplicationMenu()
+  installNonMacApplicationMenu()
   createWindow()
   initElectronUpdater()
 
@@ -736,6 +1066,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopEmbeddedOpenClaw()
   stopStudioBackend()
+  stopSelectionSidecar()
 })
 
 // ------------------------------------------------------------------
@@ -985,6 +1316,12 @@ function installMacApplicationMenu() {
         { role: 'about' },
         { type: 'separator' },
         {
+          label: '实时双语字幕…',
+          accelerator: 'Alt+Command+S',
+          click: () => createSubtitleOverlayWindow(),
+        },
+        { type: 'separator' },
+        {
           label: 'Install \'xclaw\' command in PATH',
           click: () => {
             void handlers.install()
@@ -1027,6 +1364,26 @@ function installMacApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+/** Windows / Linux：提供菜单入口打开字幕悬浮窗（macOS 使用 installMacApplicationMenu 内项） */
+function installNonMacApplicationMenu() {
+  if (process.platform === 'darwin') return
+  const template = [
+    {
+      label: 'Tools',
+      submenu: [
+        {
+          label: '实时双语字幕',
+          accelerator: 'Alt+Shift+S',
+          click: () => createSubtitleOverlayWindow(),
+        },
+      ],
+    },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
+
 // IPC 处理
 ipcMain.handle('get-system-theme', () => {
   return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
@@ -1039,6 +1396,25 @@ ipcMain.handle('set-theme', (_, theme) => {
 
 ipcMain.handle('get-app-version', () => {
   return app.getVersion()
+})
+
+ipcMain.handle('subtitle-overlay:open', () => {
+  createSubtitleOverlayWindow()
+  return { ok: true }
+})
+
+ipcMain.on('subtitle-overlay:close', () => {
+  closeSubtitleOverlayWindow()
+})
+
+ipcMain.on('subtitle-overlay:expand', (_, expanded) => {
+  if (!subtitleOverlayWindow || subtitleOverlayWindow.isDestroyed()) return
+  const [w, h] = subtitleOverlayWindow.getSize()
+  if (expanded) {
+    subtitleOverlayWindow.setSize(Math.max(w, 560), Math.max(h, 360))
+  } else {
+    subtitleOverlayWindow.setSize(560, 248)
+  }
 })
 
 /**

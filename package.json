@@ -14,7 +14,8 @@
     "lint": "pnpm --filter @xclaw/web lint",
     "typecheck": "pnpm --filter @xclaw/web typecheck",
     "test": "pnpm --filter @xclaw/web test",
-    "electron:build": "pnpm --filter @xclaw/web build && pnpm --filter @xclaw/desktop build",
+    "build:selection-sidecar": "node scripts/build-selection-sidecar.cjs",
+    "electron:build": "pnpm --filter @xclaw/web build && pnpm build:selection-sidecar && pnpm --filter @xclaw/desktop build",
     "electron:pack": "pnpm --filter @xclaw/desktop pack"
   },
   "devDependencies": {
