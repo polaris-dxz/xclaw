@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, Menu, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, nativeTheme, Menu, dialog, session } = require('electron')
 const { spawn, spawnSync } = require('child_process')
 const crypto = require('crypto')
 const fs = require('fs')
@@ -25,6 +25,47 @@ let embeddedGatewayShutdownRequested = false
 let embeddedGatewayRestartTimer = null
 let studioPort = normalizePort(process.env.STUDIO_BACKEND_PORT)
 let studioBaseUrl = `http://127.0.0.1:${studioPort}`
+
+/**
+ * 打包后页面为 file://，WebSocket/fetch 的 Origin 常为字符串 "null" 或不可用。
+ * OpenClaw 网关在 origin-check 中会先解析 Origin；无法解析则直接拒绝（与 allowedOrigins 无关）。
+ * 对本机 loopback 上的网关端口将 Origin 设为可解析的 http 环回源，以命中网关的 local-loopback 策略。
+ * 仅对已安装包启用；开发模式页面本身为 http://localhost:20263，Origin 正常，不应改写。
+ */
+function installOpenClawGatewayOriginHeaderFix() {
+  if (!app.isPackaged) {
+    return
+  }
+  const spoofOrigin = `http://${embeddedGatewayHost}:${embeddedGatewayPort}`
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    let parsed
+    try {
+      parsed = new URL(details.url)
+    } catch {
+      callback({ requestHeaders: details.requestHeaders })
+      return
+    }
+    const port = parsed.port || (parsed.protocol === 'https:' || parsed.protocol === 'wss:' ? '443' : '80')
+    if (String(port) !== String(embeddedGatewayPort)) {
+      callback({ requestHeaders: details.requestHeaders })
+      return
+    }
+    const host = parsed.hostname.toLowerCase()
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+      callback({ requestHeaders: details.requestHeaders })
+      return
+    }
+    const headers = { ...details.requestHeaders }
+    const raw = String(headers.origin ?? headers.Origin ?? '').trim()
+    if (raw && raw !== 'null' && !raw.startsWith('file:')) {
+      callback({ requestHeaders: headers })
+      return
+    }
+    // Electron 通常使用小写 header 键
+    headers.origin = spoofOrigin
+    callback({ requestHeaders: headers })
+  })
+}
 
 function normalizePort(value) {
   const parsed = Number.parseInt(String(value || ''), 10)
@@ -691,6 +732,9 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
+      // 打包后页面为 file://，访问本机服务时易受同源/CORS 影响；已安装包关闭 webSecurity。
+      // 用 app.isPackaged 判断，避免 NODE_ENV 未设为 production 时仍保持默认安全策略。
+      webSecurity: app.isPackaged ? false : isDev,
     },
   })
 
@@ -712,6 +756,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  installOpenClawGatewayOriginHeaderFix()
   await startEmbeddedOpenClaw()
   await startStudioBackend()
   installMacApplicationMenu()
