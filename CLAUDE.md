@@ -12,12 +12,18 @@ XClaw is an AI agent platform with a Next.js web UI, Electron desktop wrapper, a
 # Development
 pnpm dev              # Run web + desktop (web on port 20263)
 pnpm dev:all         # Run web + desktop + studio-api (Python backend on port 19101)
+pnpm run install:run # One-key install + start (recommended for fresh machines)
 pnpm dev:web         # Run only web app
 pnpm dev:desktop     # Run only desktop app
 pnpm dev:studio-api  # Run only Python backend
 
+# OpenClaw runtime preparation (required once per machine)
+cd apps/desktop
+npm run prepare:openclaw-runtime
+cd ../..
+
 # Building
-/pnpm build           # Build Next.js web app
+pnpm build            # Build Next.js web app
 pnpm electron:build  # Build Electron desktop app
 pnpm electron:pack   # Pack Electron app (unpacked dir)
 

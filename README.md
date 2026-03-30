@@ -34,7 +34,15 @@ XClaw is an AI agent platform that provides a modern web interface for interacti
 # Install dependencies
 pnpm install
 
-# Run development server (web + desktop)
+# Prepare OpenClaw runtime (required once)
+cd apps/desktop
+npm run prepare:openclaw-runtime
+cd ../..
+
+# One-key install + start (recommended)
+pnpm run install:run
+
+# Or run development server directly (web + desktop)
 pnpm dev
 
 # Or run all services (web + desktop + studio-api)
