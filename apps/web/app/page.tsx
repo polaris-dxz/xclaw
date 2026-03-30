@@ -12,6 +12,7 @@ import { useServerEvents } from '@/lib/use-server-events'
 import { useWebSocket } from '@/lib/websocket'
 import { cn } from '@/lib/utils'
 import { createPendingConversation } from '@/lib/pending-conversation'
+import { useModelSetupGate } from '@/lib/use-model-setup-gate'
 
 /** 与嵌入的 Star 像素办公室页面 body 背景一致（studio-api apps/web/index.html） */
 const STUDIO_CHROME_BG = '#1a1a2e'
@@ -24,6 +25,7 @@ export default function Home() {
   const { setConversations, setActiveConversation } = useXClawStore()
   const { connect } = useWebSocket()
   useServerEvents()
+  useModelSetupGate()
 
   const tabs = [
     { id: 'chat', label: '对话' },
