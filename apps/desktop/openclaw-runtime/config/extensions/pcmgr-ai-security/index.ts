@@ -92,6 +92,19 @@ async function verifyEndpoint(api: any, client: LLMShieldClient, appId: string):
   }
 }
 
+/**
+ * 防重入标记：OpenClaw 运行时在 gateway 启动过程中可能因 cacheKey 差异
+ * 多次调用 loadOpenClawPlugins → register()，导致 fetch 拦截器、event hook
+ * 等副作用被重复注册。此标记确保这些一次性副作用只执行一次。
+ *
+ * 注意：HTTP 路由注册不受此标记保护，因为 OpenClaw 只有在 gateway 阶段
+ * （第二次 register() 调用）注册的路由才会被 HTTP 服务器识别。
+ */
+let _sideEffectsDone = false;
+
+/** 缓存 LLMShieldClient 实例，供 HTTP route handler 跨 register() 调用复用 */
+let _client: LLMShieldClient | null = null;
+
 const plugin = {
   id: "pcmgr-ai-security",
   name: pkg.name,
@@ -99,47 +112,14 @@ const plugin = {
     "电脑管家 AI 安全插件 - 提供 Prompt 安全检测、工具调用审计、Skill 加载审计和脚本写入审计能力。",
 
   register(api: any) {
-    api.logger.debug(`[${LOG_TAG}] register()`);
-
-    const config = parsePluginConfig(api);
-    const {
-      appId, stateDir, logRecord, userToken,
-      enablePromptAudit, enableSkillAudit, enableScriptAudit,
-      auditReportUrl, pluginCfg,
-    } = config;
-
-    fileLog(`[register] start | version=${pkg.version}`);
-    fileLog(`[register] config: appId=${appId} env=${pluginCfg.env ?? "(default)"} userToken=${userToken ? "(set)" : "(empty)"}`);
-    fileLog(`[register] flags: promptAudit=${enablePromptAudit} skillAudit=${enableSkillAudit} scriptAudit=${enableScriptAudit} logRecord=${logRecord}`);
-
-    // --- 初始化运行时开关 ---
-    initSwitches({ enablePromptAudit, enableSkillAudit, enableScriptAudit, auditReportUrl });
-
-    // --- 环境切换 ---
-    if (pluginCfg.env) {
-      const env = pluginCfg.env as EndpointEnv;
-      setEndpointEnv(env);
-      api.logger.info(`[${LOG_TAG}] Endpoint environment set to "${env}".`);
-    } else {
-      api.logger.debug(`[${LOG_TAG}] Using default endpoint environment: "${getEndpointEnv()}".`);
-    }
-
-    // --- Security & cache setup ---
-    setSecurityConfig({ deviceFingerprint: getDeviceFingerprint() });
-
-    const messageCachePath = path.join(stateDir, "pcmgr-ai-security_cache.json");
-    const messageCache = new MessageCache(messageCachePath, api.logger, LOG_TAG);
-
-    setSecurityConfig({
-      failureThreshold: pluginCfg.failureThreshold !== undefined ? Number(pluginCfg.failureThreshold) : undefined,
-      cooldownMs: pluginCfg.cooldownSeconds !== undefined ? Number(pluginCfg.cooldownSeconds) * 1000 : undefined,
-    });
-
-    const client = new LLMShieldClient({
-      gid: getDeviceFingerprintValue(),
-      timeoutMs: pluginCfg.timeoutMs ? Number(pluginCfg.timeoutMs) : undefined,
-      encryptedUserToken: userToken,
-    });
+    // ================================================================
+    // Phase 1: HTTP 路由注册（每次 register 都执行）
+    //
+    // OpenClaw 会调用 register() 两次（插件加载 + gateway 启动），
+    // 只有 gateway 阶段注册的路由才会被 HTTP 服务器识别，
+    // 因此 HTTP 路由注册不能被防重入标记跳过。
+    // ================================================================
+    api.logger.debug(`[${LOG_TAG}] register() — registering HTTP routes (sideEffectsDone=${_sideEffectsDone})`);
 
     // --- 注册动态配置 HTTP endpoint ---
     api.registerHttpRoute({
@@ -185,15 +165,15 @@ const plugin = {
           try {
             const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
             const newToken = typeof body.encryptedUserToken === "string" ? body.encryptedUserToken : "";
-            if (newToken) {
-              client.setEncryptedUserToken(newToken);
+            if (newToken && _client) {
+              _client.setEncryptedUserToken(newToken);
               fileLog(`[token] encrypted user token updated (length=${newToken.length})`);
               api.logger.info(`[${LOG_TAG}] Encrypted user token updated dynamically.`);
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ success: true }));
             } else {
               res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ success: false, error: "encryptedUserToken is required" }));
+              res.end(JSON.stringify({ success: false, error: newToken ? "client not initialized" : "encryptedUserToken is required" }));
             }
           } catch (e: any) {
             fileLog(`[token] parse error: ${e.message}`);
@@ -208,6 +188,62 @@ const plugin = {
         return true;
       },
     });
+
+    // ================================================================
+    // Phase 2: 一次性副作用（仅首次 register 执行）
+    //
+    // FetchInterceptor、Hook、Client 创建等只需要执行一次，
+    // 重复执行会导致拦截器和 Hook 被多次注册。
+    // ================================================================
+    if (_sideEffectsDone) {
+      api.logger.info(`[${LOG_TAG}] register() called again — HTTP routes re-registered, skipping side effects.`);
+      fileLog(`[register] duplicate call — routes re-registered, side effects skipped`);
+      return;
+    }
+    _sideEffectsDone = true;
+
+    api.logger.debug(`[${LOG_TAG}] register()`);
+
+    const config = parsePluginConfig(api);
+    const {
+      appId, stateDir, logRecord, userToken,
+      enablePromptAudit, enableSkillAudit, enableScriptAudit,
+      auditReportUrl, pluginCfg,
+    } = config;
+
+    // --- 环境切换 ---
+    if (pluginCfg.env) {
+      const env = pluginCfg.env as EndpointEnv;
+      setEndpointEnv(env);
+      api.logger.info(`[${LOG_TAG}] Endpoint environment set to "${env}".`);
+    } else {
+      api.logger.debug(`[${LOG_TAG}] Using default endpoint environment: "${getEndpointEnv()}".`);
+    }
+
+    fileLog(`[register] start | version=${pkg.version}`);
+    fileLog(`[register] config: appId=${appId} env=${pluginCfg.env ?? "(default)"} userToken=${userToken ? "(set)" : "(empty)"}`);
+    fileLog(`[register] flags: promptAudit=${enablePromptAudit} skillAudit=${enableSkillAudit} scriptAudit=${enableScriptAudit} logRecord=${logRecord}`);
+
+    // --- 初始化运行时开关 ---
+    initSwitches({ enablePromptAudit, enableSkillAudit, enableScriptAudit, auditReportUrl });
+
+    // --- Security & cache setup ---
+    setSecurityConfig({ deviceFingerprint: getDeviceFingerprint() });
+
+    const messageCachePath = path.join(stateDir, "pcmgr-ai-security_cache.json");
+    const messageCache = new MessageCache(messageCachePath, api.logger, LOG_TAG);
+
+    setSecurityConfig({
+      failureThreshold: pluginCfg.failureThreshold !== undefined ? Number(pluginCfg.failureThreshold) : undefined,
+      cooldownMs: pluginCfg.cooldownSeconds !== undefined ? Number(pluginCfg.cooldownSeconds) * 1000 : undefined,
+    });
+
+    const client = new LLMShieldClient({
+      gid: getDeviceFingerprintValue(),
+      timeoutMs: pluginCfg.timeoutMs ? Number(pluginCfg.timeoutMs) : undefined,
+      encryptedUserToken: userToken,
+    });
+    _client = client; // 缓存供 HTTP route handler 使用
 
     // --- Async initialization ---
     (async () => {

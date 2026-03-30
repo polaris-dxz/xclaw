@@ -108,9 +108,34 @@ const INBOUND_META_SENTINELS = [
 
 const TIMESTAMP_ENVELOPE_RE = /^\[.*\d{4}-\d{2}-\d{2} \d{2}:\d{2}.*?\]\s*/;
 
+/**
+ * 全局时间戳信封正则，用于从尾部查找最后一个时间戳。
+ * 匹配如: [Thu 2026-03-26 19:39 GMT+8]
+ */
+const TIMESTAMP_ENVELOPE_GLOBAL_RE = /\[.*?\d{4}-\d{2}-\d{2} \d{2}:\d{2}.*?\]\s*/g;
+
 export function stripOpenClawMetadata(text: string): string {
   if (!text) return text;
 
+  // 策略 1（优先）：从尾部查找最后一个时间戳信封，提取用户真实输入。
+  // OpenClaw 会在用户消息前注入大量系统元数据（## Runtime、Sender、Conversation info 等），
+  // 用户真实消息总是在最末尾，以 [timestamp] 开头。直接定位最后一个时间戳可以跳过所有元数据。
+  let lastMatch: RegExpExecArray | null = null;
+  let match: RegExpExecArray | null;
+  // 重置 lastIndex 以确保从头开始匹配
+  TIMESTAMP_ENVELOPE_GLOBAL_RE.lastIndex = 0;
+  while ((match = TIMESTAMP_ENVELOPE_GLOBAL_RE.exec(text)) !== null) {
+    lastMatch = match;
+  }
+
+  if (lastMatch) {
+    const afterTimestamp = text.slice(lastMatch.index + lastMatch[0].length).trim();
+    if (afterTimestamp.length > 0) {
+      return afterTimestamp;
+    }
+  }
+
+  // 策略 2（fallback）：原有逻辑 - 从头部逐一跳过 sentinel 元数据块
   const lines = text.split("\n");
   let index = 0;
 

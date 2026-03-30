@@ -2,11 +2,16 @@
  * 审核服务 API 端点配置
  *
  * 支持多环境切换：test（测试）/ production（正式）
- * 自动检测：若 C:\tmp\openclaw2\test.txt 存在则使用 test 环境，否则使用 production 环境。
+ * 自动检测（跨平台）：
+ *   - Windows: 若 %APPDATA%\QClaw\logs\test.txt 存在则使用 test 环境
+ *   - macOS:   若 ~/Library/Logs/QClaw/test.txt 存在则使用 test 环境
+ *   - 否则使用 production 环境
+ * 判断仅在进程启动时执行一次。
  * 也可通过 setEndpointEnv() 手动切换。
  */
 
 import { existsSync } from "node:fs";
+import path from "node:path";
 
 export type EndpointEnv = "test" | "production";
 
@@ -38,11 +43,25 @@ const ENV_ENDPOINTS: Record<EndpointEnv, EndpointSet> = {
   },
 };
 
-/** 测试环境标记文件，存在则使用 test 环境，否则使用 production */
-const TEST_MARKER_FILE = "C:\\tmp\\openclaw2\\test.txt";
+/**
+ * 测试环境标记文件路径（跨平台，与日志目录统一）：
+ *   - Windows: %APPDATA%\QClaw\logs\test.txt
+ *   - macOS:   ~/Library/Logs/QClaw/test.txt
+ * 文件存在则使用 test 环境，否则使用 production。
+ * 判断仅在模块加载时执行一次。
+ */
+function getTestMarkerFilePath(): string {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? path.join(process.env.USERPROFILE ?? "", "AppData", "Roaming");
+    return path.join(appData, "QClaw", "logs", "test.txt");
+  }
+  // macOS: ~/Library/Logs/QClaw/test.txt
+  const home = process.env.HOME ?? "";
+  return path.join(home, "Library", "Logs", "QClaw", "test.txt");
+}
 
 function detectEnv(): EndpointEnv {
-  return existsSync(TEST_MARKER_FILE) ? "test" : "production";
+  return existsSync(getTestMarkerFilePath()) ? "test" : "production";
 }
 
 let currentEnv: EndpointEnv = detectEnv();

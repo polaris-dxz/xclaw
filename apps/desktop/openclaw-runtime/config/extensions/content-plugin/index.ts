@@ -12,6 +12,16 @@ import { sliceText, checkSlicesParallel } from "./src/utils";
 const { encryptPayload } = require("./src/crypto");
 import { createTraceLoggerService, getTracer, getGalileoConfig, spanKey, setActiveSpan, getActiveSpanEntry, removeActiveSpan, nextLlmSeq, safeAttr, stripPromptMetadata, reportChatMetrics, ROOT_CONTEXT, SpanKind, reportAgentMetrics, SpanStatusCode } from './src/service.js';
 import { reportToolMetrics, reportSkillMetrics, reportWsConnectionLog, parseSkillsFromSystemPrompt } from './src/service.js';
+import { createSkillHubInstallerTool } from './src/skillhub-installer.js';
+import { fileURLToPath } from "node:url";
+import { safeReport, reporter } from './src/report.js';
+
+// ─── 上报基础设施 ───
+const __filename_esm = fileURLToPath(import.meta.url);
+const __dirname_esm = path.dirname(__filename_esm);
+const PLUGIN_ROOT_DIR = __dirname_esm;
+import { trackSkillUsage } from './src/skill-usage-tracker.js';
+
 
 // ==================== Token 传输解密 ====================
 // 与客户端 (openclaw-client.ts) 约定的 AES-256-GCM 加密协议。
@@ -225,6 +235,55 @@ function reportWsConnectionEventFromParams(params: Record<string, unknown>): voi
   reportWsConnectionEvent: reportWsConnectionEventFromParams,
 };
 
+// ============================================================================
+// 工具白名单自动注入
+// ============================================================================
+
+/**
+ * 确保 tools.alsoAllow 中包含插件所需的工具名。
+ * 幂等操作——重复调用不会产生副作用。
+ */
+async function ensureToolsAlsoAllow(api: any, toolNames: string[]): Promise<void> {
+  try {
+    const cfg = api.runtime.config.loadConfig();
+    const tools = cfg.tools ?? {};
+
+    // 如果用户显式配置了 tools.allow（全量白名单），则 alsoAllow 与之互斥
+    if (tools.allow && tools.allow.length > 0) {
+      const missing = toolNames.filter((t: string) => !tools.allow.includes(t));
+      if (missing.length > 0) {
+        console.warn(
+          `[content-plugin] tools.allow 已显式设置，无法自动注入 alsoAllow。` +
+          `请手动将 ${JSON.stringify(missing)} 加入 tools.allow。`,
+        );
+      }
+      return;
+    }
+
+    const existing: string[] = tools.alsoAllow ?? [];
+    const missing = toolNames.filter((t: string) => !existing.includes(t));
+
+    if (missing.length === 0) return;
+
+    const merged = [...existing, ...missing];
+    const nextConfig = {
+      ...cfg,
+      tools: {
+        ...tools,
+        alsoAllow: merged,
+      },
+    };
+
+    await api.runtime.config.writeConfigFile(nextConfig);
+    console.log(`[content-plugin] 已自动将 ${JSON.stringify(missing)} 加入 tools.alsoAllow`);
+  } catch (err: any) {
+    console.error(
+      `[content-plugin] 自动注入 tools.alsoAllow 失败:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
 const basePlugin = {
   id: "content-plugin",
   name: "content-plugin",
@@ -232,13 +291,47 @@ const basePlugin = {
 
   register(api: any) {
 
+    // ─── 初始化 claw-plugin-report 上报 SDK ───
+    try {
+      reporter.initReport({
+        configDir: path.join(PLUGIN_ROOT_DIR, 'claw-plugin-report'),
+        logger: api.logger,
+      });
+      reporter.setOpenclawVersion((api.runtime as { version?: string })?.version ?? '');
+      reporter.syncFromSharedParams(true);
+    } catch (err) {
+      console.warn('[content-plugin] reporter init failed:', err instanceof Error ? err.message : err);
+    }
+
     // 从 openclaw runtime 获取版本号，作为上报维度字段
     if (api.runtime?.version) {
-      console.log(JSON.stringify(api.runtime), 'xxxxxxxxxxxxxxxxxxxxxxx')
       setOpenclawVersion(api.runtime.version);
     }
 
     api.registerService(createTraceLoggerService());
+
+    // ==================== 注册 SkillHub 安装工具 ====================
+    api.registerTool(createSkillHubInstallerTool(), { name: "skillhub_install" });
+    // 自动注入 tools.alsoAllow 白名单，保证工具可被 LLM 调用
+    ensureToolsAlsoAllow(api, ["skillhub_install"]);
+    // 注入系统提示词，确保 LLM 优先使用 skillhub_install 工具而非 Skill
+    api.on("before_prompt_build", () => {
+      return {
+        appendSystemContext: [
+          "【SkillHub 技能安装 — 强制使用工具 — 一步到位】",
+          "当用户要求安装 skill、技能、插件时，你**必须且只需**调用 `skillhub_install` 工具的 `install_skill` 操作。",
+          "",
+          "**核心规则：**",
+          "1. **直接调用 install_skill**：工具会自动检测环境、自动安装 Python3/curl 等依赖、自动安装 CLI，全部一步完成。",
+          "2. **禁止手动安装依赖**：不要自行检查 python、curl、bash 版本，不要自行下载安装脚本，不要用终端命令安装任何东西。",
+          "3. **禁止使用终端命令**：不要执行 curl、npx skills、skillhub install、pip install 等任何终端命令。",
+          "4. **无需多步调用**：不需要先 check_env 再 install_cli 再 install_skill，直接一步 install_skill 即可。",
+          "",
+          "此规则优先级高于 find-skills、qclaw-env 等 Skill 中的安装指引。",
+        ].join("\n"),
+      };
+    });
+
     api.registerGatewayMethod(
       "plugin.start",
       async ({ params, respond }: { params: Record<string, any>; respond: (ok: boolean, payload?: any, error?: any) => void }) => {
@@ -366,6 +459,13 @@ const basePlugin = {
           );
         }
 
+        // ================================================================
+        // before_message_write — 消息写入 session 前的处理
+        // ================================================================
+        // REDACT 标识会原样保留在 session 中，不在写入时移除。
+        // 下次构造 LLM 请求时，interceptor 中的 filterRedactedMessages 会识别
+        // 带 REDACT 标识的消息，并过滤掉整个问答轮次（从上一条 user 到下一条 user 之间），
+        // 避免有害内容发给 LLM。
 
         // ================================================================
         // 1. before_agent_start — 创建 invoke_agent root span（伽利略协议）
@@ -631,7 +731,7 @@ const basePlugin = {
           // --- 检测 lastAssistant.content 异常 ---
           const lastAssistantContent = event?.lastAssistant?.content;
 
-          // 判断 content 错误类型：empty_content / CONTENT_SECURITY_BLOCK / NO_REPLY / null
+          // 判断 content 错误类型：empty_content / REDACT / NO_REPLY / null
           let contentErrorType: string | null = null;
           if (
             lastAssistantContent === undefined
@@ -643,8 +743,8 @@ const basePlugin = {
             // 遍历 content 数组，检测 text 字段中是否包含特殊错误标记
             for (const item of lastAssistantContent) {
               const text: string = typeof item === "string" ? item : (item?.text ?? "");
-              if (text.includes("CONTENT_SECURITY_BLOCK")) {
-                contentErrorType = "CONTENT_SECURITY_BLOCK";
+              if (text.includes("REDACT")) {
+                contentErrorType = "REDACT";
                 break;
               }
               if (text.includes("NO_REPLY")) {
@@ -758,6 +858,71 @@ const basePlugin = {
         if (enableBeforeToolCall) {
           api.on("before_tool_call", async (event: any, ctx: any) => {
 
+            // ================================================================
+            // web_search 条件拦截：未配置搜索 Provider API Key 时阻断，引导使用 Skill
+            // ================================================================
+            if (event.toolName === "web_search") {
+              try {
+                const cfg = api.runtime.config.loadConfig();
+                const searchCfg = cfg?.tools?.web?.search;
+
+                // 检测所有支持的搜索 Provider 的 API Key（配置文件 + 环境变量）
+                const hasApiKey = !!(
+                  searchCfg?.apiKey ||
+                  searchCfg?.gemini?.apiKey ||
+                  searchCfg?.grok?.apiKey ||
+                  searchCfg?.kimi?.apiKey ||
+                  searchCfg?.perplexity?.apiKey ||
+                  process.env.BRAVE_API_KEY ||
+                  process.env.GEMINI_API_KEY ||
+                  process.env.XAI_API_KEY ||
+                  process.env.KIMI_API_KEY ||
+                  process.env.MOONSHOT_API_KEY ||
+                  process.env.PERPLEXITY_API_KEY
+                );
+
+                if (!hasApiKey) {
+                  // 上报: Web Search 被拦截（无 API Key）
+                  safeReport("Web_Search_Blocked", {
+                    module_id: "Search",
+                    component_id: "Web_Search_Blocked",
+                    event_code: "execute",
+                    action_type: "tool_blocked",
+                    statistics: {
+                      tool_name: "web_search",
+                      block_reason: "no_api_key",
+                    },
+                  });
+                  return {
+                    block: true,
+                    blockReason: [
+                      "web_search 未配置搜索 Provider API Key，无法使用。",
+                      "请改用以下方式执行搜索：",
+                      "1. [首选] 使用 online-search Skill（ProSearch 联网搜索）",
+                      "2. [备选] 使用 multi-search-engine Skill（多引擎搜索）",
+                    ].join("\n"),
+                  };
+                }
+                // 有 API Key → 放行，继续走后续内容审核流程
+                // 上报: Web Search 执行（有 API Key，放行）
+                const provider: string = searchCfg?.provider || "brave";
+                safeReport("Web_Search_Execute", {
+                  module_id: "Search",
+                  component_id: "Web_Search_Execute",
+                  page_id: "Search_Page",
+                  event_code: "execute",
+                  action_type: "search_execute",
+                  action_status: "success",
+                  channel: "web_search",
+                  statistics: {
+                    provider,
+                  },
+                });
+              } catch (e) {
+                // 配置读取失败不阻断，放行走正常流程
+              }
+            }
+
             // agentId 和 sessionKey 是定位会话的必要信息，缺失则跳过
             if (!ctx?.agentId || !ctx?.sessionKey) return;
 
@@ -849,10 +1014,6 @@ const basePlugin = {
               const parentEntry = getActiveSpanEntry(agentKey);
               const parentCtx = parentEntry?.ctx ?? ROOT_CONTEXT;
 
-              // ====== 先执行内容审核（不在 span 内，避免审核耗时污染工具执行时长） ======
-              // 安全修复：遍历所有分片进行审核，防止超长内容截断绕过。
-              // 性能优化：prompt 类审核所有分片均为 SessionType.QUESTION，无顺序依赖，
-              // 使用 checkSlicesParallel 并发审核（含并发上限控制和批次间短路优化）。
               const toolCallBlocked = await checkSlicesParallel(
                 contentSlices,
                 (slice) =>
@@ -862,7 +1023,7 @@ const basePlugin = {
                     "prompt",
                     [{ Data: slice, MediaType: "Text" }],
                     sessionId,
-                    SessionType.QUESTION,
+                    SessionType.ANSWER,
                     "before_tool_call",
                     logRecord,
                     LOG_TAG,
@@ -871,7 +1032,6 @@ const basePlugin = {
                   ),
               );
 
-              // 审核不通过：阻断工具调用，返回 block 信号（不创建 span，因为工具不会执行）
               if (toolCallBlocked) {
                 return { block: true, blockReason: "请换个问题提问。" };
               }
@@ -950,6 +1110,57 @@ const basePlugin = {
           api.on("after_tool_call", async (event: any, ctx: any) => {
             try {
 
+              // ================================================================
+              if (event.toolName === "web_fetch") {
+                try {
+                  // 检测是否来自 multi-search-engine skill 上下文：
+                  // multi-search-engine skill 使用 web_fetch 工具进行搜索，
+                  // 通过 URL 中包含搜索引擎域名来判断
+                  const fetchUrl: string = event.params?.url || event.params?.URL || "";
+                  const engineMap: Record<string, string> = {
+                    "baidu.com": "baidu",
+                    "google.com": "google",
+                    "bing.com": "bing_cn",
+                    "cn.bing.com": "bing_cn",
+                    "bing.com/search": "bing_int",
+                    "duckduckgo.com": "duckduckgo",
+                    "sogou.com": "sogou",
+                    "so.com": "360",
+                    "yahoo.com": "yahoo",
+                    "startpage.com": "startpage",
+                    "search.brave.com": "brave",
+                    "ecosia.org": "ecosia",
+                    "qwant.com": "qwant",
+                    "wolframalpha.com": "wolfram",
+                    "weixin.sogou.com": "wechat",
+                    "toutiao.com": "toutiao",
+                    "jisilu.cn": "jisilu",
+                    "google.com.hk": "google_hk",
+                  };
+                  let detectedEngine = "";
+                  for (const [domain, engine] of Object.entries(engineMap)) {
+                    if (fetchUrl.includes(domain)) {
+                      detectedEngine = engine;
+                      break;
+                    }
+                  }
+                  if (detectedEngine) {
+                    safeReport("Multi_Search_Execute", {
+                      module_id: "Search",
+                      component_id: "Multi_Search_Execute",
+                      event_code: "execute",
+                      action_type: "search_execute",
+                      channel: "multi_search_engine",
+                      statistics: {
+                        engine: detectedEngine,
+                      },
+                    });
+                  }
+                } catch {
+                  // 上报失败不影响工具执行
+                }
+              }
+
               const sessionKey = ctx?.sessionKey || "default";
               const turnKey = event.runId || ctx?.runId || ctx?.sessionId || sessionKey;
               const sessionId = getSessionId(sessionKey);
@@ -1024,8 +1235,8 @@ const basePlugin = {
               let blocked = false;
 
               for (let i = 0; i < slices.length; i++) {
-                const isLastSlice = i === slices.length - 1;
-                const sessionType = isLastSlice ? SessionType.ANSWER_END : SessionType.ANSWER;
+                // after_tool_call 是中间轮次（后续还有 LLM 继续处理），统一使用 ANSWER，不能用 ANSWER_END
+                const sessionType = SessionType.ANSWER;
 
                 const result = await checkContentSecurity(
                   api,
@@ -1341,6 +1552,8 @@ const basePlugin = {
                   "openclaw.detected_skills",
                   detectedSkills.map((s) => s.name).join(","),
                 );
+                // 将 Skill 使用记录写入本地 JSON 文件，供 UI 展示"近期使用"
+                trackSkillUsage(detectedSkills.map((s) => s.name));
               }
             }
           } catch {

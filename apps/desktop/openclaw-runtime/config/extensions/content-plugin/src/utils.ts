@@ -76,6 +76,43 @@ export const normalizeMessage = (message: any, format: string = "openai"): Norma
 };
 
 
+/**
+ * 判断 messages 数组中最后一条 user 消息是否为工具结果回传（而非真实用户输入）。
+ *
+ * 判断依据：
+ * 1. OpenAI 格式：最后一条 user 消息之前紧邻的 assistant 消息带有 tool_calls
+ * 2. Anthropic 格式：最后一条 user 消息的 content 数组中包含 type=tool_result 的部分
+ */
+const isToolResultMessage = (messages: any[], lastUserIndex: number): boolean => {
+  const lastUserMsg = messages[lastUserIndex];
+
+  // Anthropic 格式：content 数组中含有 tool_result
+  if (Array.isArray(lastUserMsg?.content)) {
+    const hasToolResult = lastUserMsg.content.some(
+      (part: any) => part.type === "tool_result" || part.type === "tool_use",
+    );
+    if (hasToolResult) return true;
+  }
+
+  // OpenAI 格式：向前找最近的 assistant 消息，若带有 tool_calls 则说明当前 user 是工具结果回传
+  for (let i = lastUserIndex - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === "assistant") {
+      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        return true;
+      }
+      // 找到 assistant 消息但没有 tool_calls，停止向前查找
+      break;
+    }
+    // 跳过 tool 角色消息（OpenAI tool result 消息）
+    if (msg.role === "tool") {
+      return true;
+    }
+  }
+
+  return false;
+};
+
 export const extractLastUserMessage = (body: any): NormalizedMessage[] => {
   if (!body || typeof body !== "object") return [];
 
@@ -86,10 +123,15 @@ export const extractLastUserMessage = (body: any): NormalizedMessage[] => {
     if (normalized.role !== "user") {
       return [];
     }
-    if (normalized.content.length > 0) {
-      return [normalized];
+    if (normalized.content.length === 0) {
+      return [];
     }
-    return [];
+    // 工具结果回传不是真实用户输入，跳过输入送审
+    const lastUserIndex = body.messages.length - 1;
+    if (isToolResultMessage(body.messages, lastUserIndex)) {
+      return [];
+    }
+    return [normalized];
   }
 
   // 旧版 Completion API：prompt 字段
@@ -187,6 +229,47 @@ export const checkSlicesParallel = async (
   }
 
   return false;
+};
+
+// ==================== 通用本地日志工具 ====================
+
+/** 是否开启内容安全日志，统一由此字段控制 */
+export const ENABLE_CONTENT_SECURITY_LOG = false;
+
+let _sharedLogStream: any = null;
+
+const getLogFileStream = (): any => {
+  if (_sharedLogStream) return _sharedLogStream;
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+    const logDir = path.join(os.homedir(), "openclaw-logs");
+    try {
+      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    } catch { }
+    const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const logPath = path.join(logDir, `content-security-${dateStr}.log`);
+    _sharedLogStream = fs.createWriteStream(logPath, { flags: "a", encoding: "utf8" });
+    if (ENABLE_CONTENT_SECURITY_LOG) console.log(`[content-security] 日志文件路径: ${logPath}`);
+  } catch { }
+  return _sharedLogStream;
+};
+
+/**
+ * 写入一条内容安全日志。
+ * 格式：[ISO时间] [content-security] [phase] {JSON数据}
+ * 受 ENABLE_CONTENT_SECURITY_LOG 控制，关闭时静默跳过。
+ */
+export const writeSecurityLog = (phase: string, data: Record<string, unknown>): void => {
+  if (!ENABLE_CONTENT_SECURITY_LOG) return;
+  try {
+    const ts = new Date().toISOString();
+    const line = `[${ts}] [content-security] [${phase}] ${JSON.stringify(data)}`;
+    console.log(line);
+    const stream = getLogFileStream();
+    if (stream) stream.write(line + "\n");
+  } catch { }
 };
 
 export const extractAssistantContent = (body: any): string => {

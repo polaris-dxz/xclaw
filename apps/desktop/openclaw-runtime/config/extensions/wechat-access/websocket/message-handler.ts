@@ -21,7 +21,7 @@ import { onAgentEvent, type AgentEventPayload } from '../common/agent-events.js'
 import { sendPromptResponseReliable } from './terminal-response-queue.js'
 
 /** 安全拦截标记，由 content-security 的 fetch 拦截器嵌入伪 SSE 响应中 */
-const SECURITY_BLOCK_MARKER = '<!--CONTENT_SECURITY_BLOCK-->'
+const SECURITY_BLOCK_MARKER = '<!--REDACT-->'
 
 /** 安全拦截后返回给微信用户的通用提示文本（不暴露具体拦截原因） */
 const SECURITY_BLOCK_USER_MESSAGE =
