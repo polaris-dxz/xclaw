@@ -5,10 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 PYPROJECT_DIR="${ROOT_DIR}/apps/studio-api/apps/api"
 
-# Strategy A: runtime extensions take precedence.
-# If the same plugin id exists in ~/.xclaw/extensions, temporarily move it away
-# before starting OpenClaw, then restore on exit.
-RUNTIME_EXT_DIR="${ROOT_DIR}/apps/desktop/openclaw-runtime/config/extensions"
 USER_EXT_DIR="${HOME}/.xclaw/extensions"
 DISABLED_EXT_DIR="${HOME}/.xclaw/extensions.__disabled"
 
@@ -54,76 +50,40 @@ uv venv "${VENV_DIR}"
 log "安装 Python 依赖 (uv pip install -e)"
 uv pip install --python "${VENV_DIR}/bin/python" -e "${PYPROJECT_DIR}"
 
-MOVES_FILE=""
+restore_disabled_extensions_if_needed() {
+  # Earlier versions of this script temporarily moved ~/.xclaw/extensions/* into
+  # ~/.xclaw/extensions.__disabled to avoid duplicate plugin ids. However, in the
+  # current desktop embedded flow, ~/.xclaw/extensions is also used as the bundled
+  # extensions root. If it is emptied, OpenClaw will report "plugin not found".
+  #
+  # So we only do a one-time best-effort restore here.
+  [[ -d "${DISABLED_EXT_DIR}" ]] || return 0
+  [[ -d "${USER_EXT_DIR}" ]] || return 0
 
-cleanup_restore_extensions() {
-  # Restore ~/.xclaw/extensions after dev exits.
-  if [[ -z "${MOVES_FILE}" || ! -f "${MOVES_FILE}" ]]; then
-    return 0
-  fi
-  if [[ ! -d "${DISABLED_EXT_DIR}" ]]; then
-    return 0
-  fi
-
-  while IFS='|' read -r dst id; do
-    [[ -d "${dst}" ]] || continue
-    mkdir -p "${USER_EXT_DIR}"
-    local dest="${USER_EXT_DIR}/${id}"
-    if [[ -e "${dest}" ]]; then
-      dest="${USER_EXT_DIR}/${id}.restore-$(date +%s%N)"
-    fi
-    mv "${dst}" "${dest}"
-  done < "${MOVES_FILE}"
-
-  rm -f "${MOVES_FILE}"
-  log "已还原用户插件目录: ${USER_EXT_DIR}"
-}
-
-apply_runtime_priority_strategy_a() {
-  # Only move plugins that also exist in runtime extensions.
-  if [[ ! -d "${RUNTIME_EXT_DIR}" ]]; then
-    log "未找到 runtime extensions: ${RUNTIME_EXT_DIR}，跳过策略 A"
-    return 0
-  fi
-  if [[ ! -d "${USER_EXT_DIR}" ]]; then
-    log "未找到用户 extensions: ${USER_EXT_DIR}，跳过策略 A"
-    return 0
-  fi
-
-  mkdir -p "${DISABLED_EXT_DIR}"
-  MOVES_FILE="${DISABLED_EXT_DIR}/.moves-$(date +%Y%m%d%H%M%S)-$$.txt"
-  : > "${MOVES_FILE}"
-
-  local moved_any=false
-  for p in "${RUNTIME_EXT_DIR}"/*; do
-    [[ -d "${p}" ]] || continue
-    local id
-    id="$(basename "${p}")"
-    local src="${USER_EXT_DIR}/${id}"
-    [[ -d "${src}" ]] || continue
-
-    local dst="${DISABLED_EXT_DIR}/${id}"
-    if [[ -e "${dst}" ]]; then
-      dst="${DISABLED_EXT_DIR}/${id}.bak-$(date +%s%N)"
-    fi
-
-    mv "${src}" "${dst}"
-    echo "${dst}|${id}" >> "${MOVES_FILE}"
-    moved_any=true
-  done
-
-  if [[ "${moved_any}" == "false" ]]; then
-    rm -f "${MOVES_FILE}"
-    MOVES_FILE=""
-    log "策略 A：未检测到需要禁用的重复插件"
-  else
-    log "策略 A：已禁用重复插件，启动前避免冲突"
+  # If extensions dir is empty but disabled dir has plugin folders, restore them.
+  local user_count disabled_count
+  user_count="$(find "${USER_EXT_DIR}" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')"
+  disabled_count="$(find "${DISABLED_EXT_DIR}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ "${user_count}" == "0" && "${disabled_count}" != "0" ]]; then
+    log "检测到插件目录被禁用（${DISABLED_EXT_DIR}），正在自动还原到 ${USER_EXT_DIR}"
+    for p in "${DISABLED_EXT_DIR}"/*; do
+      [[ -d "${p}" ]] || continue
+      local id
+      id="$(basename "${p}")"
+      # skip accidental dot dirs / move logs
+      [[ "${id}" == .* ]] && continue
+      if [[ -e "${USER_EXT_DIR}/${id}" ]]; then
+        mv "${p}" "${USER_EXT_DIR}/${id}.restore-$(date +%s%N)"
+      else
+        mv "${p}" "${USER_EXT_DIR}/${id}"
+      fi
+    done
+    rm -f "${DISABLED_EXT_DIR}"/.moves-*.txt 2>/dev/null || true
+    log "已还原插件目录"
   fi
 }
 
-log "应用策略 A：runtime extension 优先（避免重复插件 id）"
-apply_runtime_priority_strategy_a
-trap cleanup_restore_extensions EXIT INT TERM
+restore_disabled_extensions_if_needed
 
 log "环境准备完成，启动开发环境 (pnpm dev:all)"
 pnpm dev:all
