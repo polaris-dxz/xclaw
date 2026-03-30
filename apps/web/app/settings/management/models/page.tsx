@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   Brain,
   ChevronDown,
@@ -73,6 +74,11 @@ const emptyModel = (): ModelFormEntry => ({
 })
 
 export default function ModelsSettingsPage() {
+  const router = useRouter()
+  const fromSetupRef = useRef(false)
+  const openAddQueryHandledRef = useRef(false)
+  /** 首次设置流程：必须保存成功，不可关闭弹窗 */
+  const [setupGateLock, setSetupGateLock] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -262,13 +268,14 @@ export default function ModelsSettingsPage() {
   }
 
   const closeCustomModelDialog = () => {
+    setSetupGateLock(false)
     setDialogOpen(false)
     setEditingKey(null)
     setModalError('')
     setAdvancedOpen({})
   }
 
-  const openAddCustomModel = () => {
+  const openAddCustomModel = useCallback(() => {
     setError('')
     setModalError('')
     setEditingKey(null)
@@ -285,7 +292,23 @@ export default function ModelsSettingsPage() {
       defaultModelId: '',
     })
     setDialogOpen(true)
-  }
+  }, [])
+
+  useEffect(() => {
+    if (loading) return
+    if (openAddQueryHandledRef.current) return
+    if (typeof window === 'undefined') return
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('openAdd') !== '1') return
+    openAddQueryHandledRef.current = true
+    if (params.get('fromSetup') === '1') {
+      fromSetupRef.current = true
+      setSetupGateLock(true)
+    }
+    setTab('custom')
+    openAddCustomModel()
+    router.replace('/settings/management/models', { scroll: false })
+  }, [loading, router, openAddCustomModel])
 
   const openEditCustomModel = (p: ProviderRow) => {
     setError('')
@@ -372,6 +395,11 @@ export default function ModelsSettingsPage() {
       }
       setSuccess('已保存')
       closeCustomModelDialog()
+      if (fromSetupRef.current) {
+        fromSetupRef.current = false
+        router.replace('/setup/models')
+        return
+      }
       setForm({
         providerKey: '',
         displayName: '',
@@ -536,16 +564,32 @@ export default function ModelsSettingsPage() {
           <Dialog
             open={dialogOpen}
             onOpenChange={(open) => {
+              if (!open && setupGateLock) return
               setDialogOpen(open)
               if (!open) {
+                setSetupGateLock(false)
                 setEditingKey(null)
                 setModalError('')
                 setAdvancedOpen({})
               }
             }}
           >
-            <DialogContent className="flex max-h-[min(92vh,56rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl">
-              <DialogHeader className="shrink-0 border-b px-6 py-4 pr-12 text-left">
+            <DialogContent
+              showCloseButton={!setupGateLock}
+              onPointerDownOutside={(e) => {
+                if (setupGateLock) e.preventDefault()
+              }}
+              onEscapeKeyDown={(e) => {
+                if (setupGateLock) e.preventDefault()
+              }}
+              className="flex max-h-[min(92vh,56rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl"
+            >
+              <DialogHeader
+                className={cn(
+                  'shrink-0 border-b px-6 py-4 text-left',
+                  setupGateLock ? 'pr-6' : 'pr-12',
+                )}
+              >
                 <DialogTitle>{editingKey ? '编辑自定义模型' : '添加自定义模型'}</DialogTitle>
               </DialogHeader>
               <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
@@ -888,9 +932,11 @@ export default function ModelsSettingsPage() {
                 </div>
               </div>
               <DialogFooter className="shrink-0 gap-2 border-t px-6 py-4 sm:justify-end">
-                <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
-                  取消
-                </Button>
+                {!setupGateLock && (
+                  <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>
+                    取消
+                  </Button>
+                )}
                 <Button type="button" onClick={saveCustomModel} disabled={saving}>
                   <Save className="h-4 w-4 mr-1" />
                   {saving ? '保存中...' : '保存'}
