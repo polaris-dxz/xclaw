@@ -56,3 +56,9 @@ __pycache__/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# rust (selection-sidecar)
+native/selection-sidecar/target/
+
+# electron-builder（DMG / zip / 解包目录等）
+apps/desktop/dist/

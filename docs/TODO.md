@@ -72,16 +72,16 @@
 - [ ] 执行完整 smoke 测试清单（关键 API + 关键页面路径）。
 - [ ] 补必要的回归测试（优先任务流、智能体操作、评论线程）。
 
-### 远控通道（临时下线 UI，待调通后恢复）
-- [ ] **微信客服号**（`wechat_access` / `wechat-access` 插件）与 **企业微信**（`wecom` / `wecom-openclaw-plugin`）已从「远控通道」配置 Sheet 的卡片列表中注释隐藏：端到端尚未调通。
-- [ ] 恢复步骤：编辑 `apps/web/components/remote/remote-channel-sheet.tsx` 中 `PLATFORMS` 数组，取消上述两项的块注释；回归 `POST /api/remote-channels`、桌面端插件加载与网关健康。
+### 远控通道（仅微信客服号卡片临时隐藏）
+- [ ] **微信客服号**（`wechat_access` / `wechat-access`）已从「远控通道」Sheet 注释隐藏（腾讯通路未调通）。**企业微信**（`wecom`）正常展示。
+- [ ] 恢复微信客服号：编辑 `apps/web/components/remote/remote-channel-sheet.tsx` 中 `PLATFORMS`，取消 `wechat_access` 块注释；回归 `POST /api/remote-channels` 与插件。
 
 ---
 
 ## 本次更新记录
 
 - 2026-03-23：
-  - 远控通道：暂时注释隐藏「微信客服号」「企业微信」两张配置卡片（见上节 TODO）；后端与插件代码保留，仅 UI 不展示。
+  - 远控通道：仅隐藏「微信客服号」卡片；「企业微信」正常展示（见上节 TODO）。
 
 - 2026-03-20：
   - 新建本文件作为迁移总清单。

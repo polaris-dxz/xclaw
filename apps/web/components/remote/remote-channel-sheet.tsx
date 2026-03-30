@@ -76,8 +76,7 @@ const PLATFORMS: {
     guideUrl: REMOTE_CHANNEL_GUIDES.weixin,
     logoClass: 'bg-[#07C160]',
   },
-  // --- 暂时隐藏：微信客服号（腾讯通路 wechat-access）、企业微信（wecom）---
-  // 原因：端到端链路尚未调通；恢复时在 TODO.md 勾项并取消下方两段注释。
+  // --- 暂时隐藏：微信客服号（腾讯通路 wechat-access）；恢复时取消下方块注释 ---
   // {
   //   id: 'wechat_access',
   //   name: '微信客服号',
@@ -88,16 +87,16 @@ const PLATFORMS: {
   //   guideUrl: REMOTE_CHANNEL_GUIDES.wechat_access,
   //   logoClass: 'bg-[#07C160]',
   // },
-  // {
-  //   id: 'wecom',
-  //   name: '企业微信',
-  //   description:
-  //     '在企业微信后台创建机器人，填写 Bot ID 与 Secret 保存；凭据仅保存在本机。',
-  //   recommended: true,
-  //   channelKey: 'wecom',
-  //   guideUrl: REMOTE_CHANNEL_GUIDES.wecom,
-  //   logoClass: 'bg-[#2B6CEE]',
-  // },
+  {
+    id: 'wecom',
+    name: '企业微信',
+    description:
+      '在企业微信后台创建机器人，填写 Bot ID 与 Secret 保存；凭据仅保存在本机。',
+    recommended: true,
+    channelKey: 'wecom',
+    guideUrl: REMOTE_CHANNEL_GUIDES.wecom,
+    logoClass: 'bg-[#2B6CEE]',
+  },
   {
     id: 'qq',
     name: 'QQ',
@@ -225,7 +224,7 @@ export function RemoteChannelSheet({
             <SheetTitle className="text-base font-medium text-muted-foreground">
               接入远控通道，用户可以直接在聊天工具中与 xclaw 对话交互
             </SheetTitle>
-            <SheetDescription className="sr-only">配置 QQ、微信、飞书、钉钉等远控通道</SheetDescription>
+            <SheetDescription className="sr-only">配置 QQ、微信、企业微信、飞书、钉钉等远控通道</SheetDescription>
           </SheetHeader>
           <div className="flex-1 overflow-y-auto px-6 py-5 bg-muted/30">
             {loadingStatus ? (

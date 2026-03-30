@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>实时双语字幕</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+          'PingFang SC', 'Microsoft YaHei', sans-serif;
+        font-size: 13px;
+        color: #e8e8ec;
+        background: transparent;
+        overflow: hidden;
+        user-select: none;
+      }
+      .shell {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        border-radius: 14px;
+        background: rgba(38, 38, 42, 0.96);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+        overflow: hidden;
+      }
+      .toolbar {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 10px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        -webkit-app-region: drag;
+      }
+      .toolbar-left,
+      .toolbar-right {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .toolbar-right {
+        -webkit-app-region: no-drag;
+      }
+      .tool {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 4px 8px;
+        border-radius: 8px;
+        font-size: 12px;
+        color: #c4c4cc;
+        -webkit-app-region: no-drag;
+        cursor: pointer;
+      }
+      .tool:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f0f0f4;
+      }
+      .tool svg {
+        width: 14px;
+        height: 14px;
+        opacity: 0.85;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #34c759;
+      }
+      select.tool-select {
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: #e8e8ec;
+        border-radius: 8px;
+        padding: 4px 8px;
+        font-size: 12px;
+        cursor: pointer;
+        max-width: 140px;
+      }
+      .btn-icon {
+        width: 28px;
+        height: 28px;
+        border: none;
+        border-radius: 8px;
+        background: transparent;
+        color: #a0a0a8;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-app-region: no-drag;
+      }
+      .btn-icon:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: #f0f0f4;
+      }
+      .content {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 16px;
+        transition: min-height 0.2s ease;
+      }
+      .body.expanded .content {
+        min-height: 200px;
+      }
+      .placeholder {
+        font-size: 14px;
+        color: #6e6e78;
+        text-align: center;
+        line-height: 1.6;
+      }
+      .hint {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #5a5a62;
+      }
+    </style>
+  </head>
+  <body class="body">
+    <div class="shell">
+      <header class="toolbar">
+        <div class="toolbar-left">
+          <span class="tool" title="翻译目标语言">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M2 12h20M12 2a15 15 0 0 1 0 20M12 2a15 15 0 0 0 0 20" />
+            </svg>
+            <span>翻译为：</span>
+            <select id="lang" class="tool-select" aria-label="目标语言">
+              <option value="en">英文</option>
+              <option value="zh">中文</option>
+              <option value="ja">日本語</option>
+            </select>
+          </span>
+          <span class="tool" id="toggle-original" title="切换原文显示">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="4" width="20" height="14" rx="2" />
+              <path d="M6 8h4M6 12h8M6 16h6" />
+            </svg>
+            <span class="dot" aria-hidden="true"></span>
+            <span id="original-label">关闭原文</span>
+          </span>
+          <span class="tool" title="字号">
+            <span style="font-weight: 600">Aa</span>
+            <select id="font-size" class="tool-select" aria-label="字号">
+              <option value="sm">小号字体</option>
+              <option value="md" selected>中号字体</option>
+              <option value="lg">大号字体</option>
+            </select>
+          </span>
+        </div>
+        <div class="toolbar-right">
+          <button type="button" class="btn-icon" id="btn-expand" title="展开字幕">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+            </svg>
+          </button>
+          <button type="button" class="btn-icon" id="btn-close" title="关闭" aria-label="关闭">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M15 9l-6 6M9 9l6 6" />
+            </svg>
+          </button>
+        </div>
+      </header>
+      <main class="content">
+        <div>
+          <p class="placeholder" id="status-text">暂无音频播放</p>
+          <p class="hint">独立悬浮窗：主窗口最小化后仍可保持显示（演示布局，未接实时 ASR）。</p>
+        </div>
+      </main>
+    </div>
+    <script>
+      const body = document.querySelector('.body')
+      const originalLabel = document.getElementById('original-label')
+      const toggleOriginal = document.getElementById('toggle-original')
+      let originalOn = true
+      toggleOriginal.addEventListener('click', () => {
+        originalOn = !originalOn
+        originalLabel.textContent = originalOn ? '关闭原文' : '显示原文'
+      })
+      document.getElementById('btn-expand').addEventListener('click', () => {
+        body.classList.toggle('expanded')
+        if (window.subtitleOverlay && typeof window.subtitleOverlay.expand === 'function') {
+          window.subtitleOverlay.expand(body.classList.contains('expanded'))
+        }
+      })
+      document.getElementById('btn-close').addEventListener('click', () => {
+        if (window.subtitleOverlay && typeof window.subtitleOverlay.close === 'function') {
+          window.subtitleOverlay.close()
+        }
+      })
+    </script>
+  </body>
+</html>
