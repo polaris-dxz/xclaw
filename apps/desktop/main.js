@@ -354,15 +354,6 @@ function readJsonObject(filePath) {
   }
 }
 
-function readExternalOpenClawPrimaryModel() {
-  const externalConfigPath = path.join(os.homedir(), '.openclaw', 'openclaw.json')
-  const parsed = readJsonObject(externalConfigPath)
-  if (!parsed) return ''
-  const primary = String(parsed?.agents?.defaults?.model?.primary || '').trim()
-  if (!primary || primary.startsWith('xclaw/')) return ''
-  return primary
-}
-
 function syncExternalOpenClawAgentAuthProfiles(paths, agentId = 'main') {
   const sourcePath = path.join(os.homedir(), '.openclaw', 'agents', agentId, 'agent', 'auth-profiles.json')
   const targetPath = path.join(paths.stateDir, 'agents', agentId, 'agent', 'auth-profiles.json')
@@ -393,15 +384,12 @@ function ensureEmbeddedOpenClawConfig(paths) {
   if (!config.agents.defaults.model || typeof config.agents.defaults.model !== 'object') {
     config.agents.defaults.model = {}
   }
+  // Do NOT migrate default model from ~/.openclaw.
+  // The embedded instance's default model must be explicitly configured by XClaw
+  // (e.g. via Setup Gate / settings), otherwise leave it unset.
   const configuredPrimaryModel = String(config.agents.defaults.model.primary || '').trim()
-  const externalPrimaryModel = readExternalOpenClawPrimaryModel()
-  // Prefer user's existing ~/.openclaw model setting when embedded config is unset.
   if (!configuredPrimaryModel || configuredPrimaryModel.startsWith('xclaw/')) {
-    if (externalPrimaryModel) {
-      config.agents.defaults.model.primary = externalPrimaryModel
-    } else {
-      delete config.agents.defaults.model.primary
-    }
+    delete config.agents.defaults.model.primary
   }
 
   if (config.models && typeof config.models === 'object') {
