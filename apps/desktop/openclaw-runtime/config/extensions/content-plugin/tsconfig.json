@@ -16,7 +16,8 @@
   },
   "include": [
     "index.ts",
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "claw-plugin-report/**/*.ts"
   ],
   "exclude": [
     "node_modules",

@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import type {
   CreateTaskClientOptions,
   CreateTaskRequest,
@@ -8,7 +6,7 @@ import type {
   SessionType,
   SceneType,
 } from "./types";
-import { generateRequestId, getCurrentTimestamp, generateTraceparent } from "./utils";
+import { generateRequestId, getCurrentTimestamp, generateTraceparent, writeSecurityLog } from "./utils";
 
 /** createTask 返回结果，包含业务响应和本次请求的 traceId */
 export interface CreateTaskResult {
@@ -143,7 +141,26 @@ export class CreateTaskClient {
         }
 
         // 写入本地日志：记录发送给服务端的输入和服务端返回的输出
-
+        writeSecurityLog("送审→  请求体", {
+          requestId,
+          sessionId,
+          sessionType,
+          scene,
+          qaid: qaid ?? "",
+          body: request.data,
+        });
+        writeSecurityLog("←送审  响应体", {
+          requestId,
+          sessionId,
+          sessionType,
+          scene,
+          resultCode: response.data?.ResultCode ?? "",
+          resultType: response.data?.ResultType ?? "",
+          resultTypeLevel: response.data?.ResultTypeLevel ?? "",
+          traceID: response.data?.TraceID ?? "",
+          commonCode: response.common?.code ?? "",
+          commonMessage: response.common?.message ?? "",
+        });
 
         return { response, traceId, requestId };
       } catch (e: any) {

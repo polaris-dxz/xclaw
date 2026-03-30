@@ -158,7 +158,7 @@ export const checkContentSecurity = async (
           openclawVersion: getOpenclawVersion() ?? undefined,
         });
 
-        return passResult;
+        return { ...passResult, degraded: true, errorType: "probe_failed" };
       }
     } else {
       // 降级模式，未到探测时机，直接放行
@@ -183,7 +183,7 @@ export const checkContentSecurity = async (
         openclawVersion: getOpenclawVersion() ?? undefined,
       });
 
-      return passResult;
+      return { ...passResult, degraded: true, errorType: "degraded_skip" };
     }
   }
 
@@ -224,7 +224,7 @@ export const checkContentSecurity = async (
           openclawVersion: getOpenclawVersion() ?? undefined,
         });
 
-        return passResult;
+        return { ...passResult, errorType: "empty_response" };
       }
 
       let labels: Record<string, any> = {};
@@ -336,7 +336,7 @@ export const checkContentSecurity = async (
       });
 
       // 错误时返回放行结果（降级策略：不打击）
-      return passResult;
+      return { ...passResult, degraded: consecutiveFailures >= failureThreshold, errorType: isTimeout ? "timeout" : "request_error" };
     }
   }
 
@@ -348,5 +348,5 @@ export const checkContentSecurity = async (
     "security.check.duration_ms": fallbackDurationMs,
     "security.check.fallback_exit": true,
   });
-  return passResult;
+  return { ...passResult, errorType: "fallback_exit" };
 };

@@ -5,10 +5,22 @@
  *   - Windows: %APPDATA%\QClaw\logs\
  *   - macOS:   ~/Library/Logs/QClaw/
  * 调用 setLogFilePath 可切换路径。
+ *
+ * 日志开关策略（不区分环境，统一行为）：
+ *   - 默认不生成日志
+ *   - 在日志目录放置 `.debug-enabled` 文件后重启进程即可开启
+ *   - 判断仅在进程启动时执行一次，零运行时开销
+ *
+ * 开关文件路径：
+ *   - Windows: %APPDATA%\QClaw\logs\.debug-enabled
+ *   - macOS:   ~/Library/Logs/QClaw/.debug-enabled
  */
 
-import fs from "node:fs";
+import fs, { existsSync } from "node:fs";
 import path from "node:path";
+
+/** 日志开关标记文件名：在日志目录下创建此空文件即可开启日志 */
+const DEBUG_MARKER_FILE = ".debug-enabled";
 
 /** 默认日志目录：应用日志目录 */
 function getDefaultLogDir(): string {
@@ -20,6 +32,12 @@ function getDefaultLogDir(): string {
   const home = process.env.HOME ?? "";
   return path.join(home, "Library", "Logs", "QClaw");
 }
+
+/**
+ * 日志是否启用——进程启动时检测一次，结果缓存，后续零 I/O 开销。
+ * 删除或创建 .debug-enabled 文件后需重启进程生效。
+ */
+const _logEnabled: boolean = existsSync(path.join(getDefaultLogDir(), DEBUG_MARKER_FILE));
 
 let logFilePath = "";
 
@@ -48,9 +66,15 @@ function ensureLogDir(filePath: string): void {
 }
 
 /**
- * 通用文件日志，始终落盘到日志文件。
+ * 通用文件日志。
+ *
+ * - 默认不写日志
+ * - 日志目录存在 `.debug-enabled` 文件时才落盘
+ * - 开关在进程启动时一次性确定，fileLog 调用本身零 I/O 开销（未启用时）
  */
 export function fileLog(message: string): void {
+  if (!_logEnabled) return;
+
   const timestamp = new Date().toISOString();
   const target = getEffectiveLogPath();
   ensureLogDir(target);

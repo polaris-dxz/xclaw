@@ -16,6 +16,7 @@ import {
 import { checkContentSecurity } from "./security";
 import { trySkillAudit } from "./skill-audit";
 import { tryScriptAudit } from "./script-audit";
+import { checkExecGuard } from "./exec-guard";
 import { extractSessionContext } from "./session-history";
 import {
   reportAuditLog,
@@ -46,6 +47,30 @@ export function registerBeforeToolCall(config: HookRegistrationConfig): void {
     if (!ctx.agentId || !ctx.sessionKey) return;
 
     const { enableSkillAudit, enableScriptAudit } = getSwitches();
+
+    // --- Exec guard: block untrusted-directory executable execution ---
+    // 注意：不使用 block:true，因为 OpenClaw 对 block:true 的处理是 throw Error
+    // 导致 agent 运行以 stop_error 终止，AI 无法将拦截原因回复给用户。
+    // 改为替换 command 参数为 echo 拦截信息，让工具"成功"执行后 AI 能正常回复。
+    const execGuardResult = checkExecGuard(event.toolName, event.params?.command as string | undefined);
+    if (execGuardResult.blocked) {
+      api.logger.warn(`[${LOG_TAG}] exec-guard BLOCKED: ${execGuardResult.filePath}`);
+      reportAuditLog({
+        actiontype: AuditActionType.EXEC_SCRIPT_CHECK,
+        detail: execGuardResult.filePath ?? String(event.params?.command ?? ""),
+        risklevel: AuditRiskLevel.RISKY,
+        result: AuditResult.BLOCK,
+        optpath: execGuardResult.reason ?? "untrusted directory executable execution",
+      }).catch(() => {});
+
+      // 将命令替换为 echo 拦截信息，让 exec 工具正常返回拦截原因
+      // 使用 PowerShell Write-Output + 单引号（Windows）或 printf（Unix）避免注入
+      const reason = execGuardResult.reason ?? "Blocked by exec-guard policy";
+      const echoCommand = process.platform === "win32"
+        ? `Write-Output '${reason.replace(/'/g, "''")}'`
+        : `printf '%s\\n' '${reason.replace(/'/g, "'\\''")}'`;
+      return { params: { command: echoCommand } };
+    }
 
     // --- Extract session context (moved before all audits so history is available) ---
     const { historyV2, thinkingContent } = extractSessionContext(

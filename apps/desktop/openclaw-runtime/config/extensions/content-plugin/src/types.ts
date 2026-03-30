@@ -119,6 +119,10 @@ export interface SecurityCheckResult {
   traceId?: string;
   /** 本次审核请求的唯一 request_id，用于链路追踪 */
   requestId?: string;
+  /** 是否走了降级逻辑（审核服务不可用时放行） */
+  degraded?: boolean;
+  /** 降级/错误原因：degraded_skip | probe_failed | empty_response | timeout | request_error | fallback_exit */
+  errorType?: string;
 }
 
 // ==================== 安全配置 ====================

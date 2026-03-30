@@ -19,6 +19,8 @@ function generateClientId(): string {
  */
 export function markdownToPlainText(text: string): string {
   let result = text;
+  // Strip REDACT wrapper tags (keep inner content)
+  result = result.replace(/<!--REDACT-->/g, "").replace(/<!--\/REDACT-->/g, "");
   // Code blocks: strip fences, keep code content
   result = result.replace(/```[^\n]*\n?([\s\S]*?)```/g, (_, code: string) => code.trim());
   // Images: remove entirely

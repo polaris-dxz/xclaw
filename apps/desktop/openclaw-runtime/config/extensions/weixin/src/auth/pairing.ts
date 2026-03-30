@@ -69,12 +69,66 @@ const LOCK_OPTIONS = {
 };
 
 /**
- * Register a user ID in the framework's channel allowFrom store.
- * This writes directly to the same JSON file that `readChannelAllowFromStore` reads,
- * making the user visible to the framework authorization pipeline.
+ * Remove a specific user ID from the framework's channel allowFrom store.
+ * Returns { changed: true } if the entry was found and removed.
  *
  * Uses file locking to avoid races with concurrent readers/writers.
+ * (V-412 安全漏洞修复 — 提供 allowFrom 条目精细删除能力)
  */
+export async function removeUserFromFrameworkStore(params: {
+  accountId: string;
+  userId: string;
+}): Promise<{ changed: boolean }> {
+  const { accountId, userId } = params;
+  const trimmedUserId = userId.trim();
+  if (!trimmedUserId) return { changed: false };
+
+  const filePath = resolveFrameworkAllowFromPath(accountId);
+  if (!fs.existsSync(filePath)) return { changed: false };
+
+  return await withFileLock(filePath, LOCK_OPTIONS, async () => {
+    let content: AllowFromFileContent = { version: 1, allowFrom: [] };
+    try {
+      const raw = fs.readFileSync(filePath, "utf-8");
+      const parsed = JSON.parse(raw) as AllowFromFileContent;
+      if (Array.isArray(parsed.allowFrom)) {
+        content = parsed;
+      }
+    } catch {
+      return { changed: false };
+    }
+
+    const idx = content.allowFrom.indexOf(trimmedUserId);
+    if (idx === -1) return { changed: false };
+
+    content.allowFrom.splice(idx, 1);
+    fs.writeFileSync(filePath, JSON.stringify(content, null, 2), "utf-8");
+    logger.info(
+      `removeUserFromFrameworkStore: removed userId=${trimmedUserId} accountId=${accountId}`,
+    );
+    return { changed: true };
+  });
+}
+
+/**
+ * Clear all entries from the framework allowFrom store for a given account.
+ * Removes the allowFrom file entirely.
+ * (V-412 安全漏洞修复 — 提供 allowFrom 整体清除能力)
+ */
+export function clearFrameworkAllowFromStore(accountId: string): { removed: boolean } {
+  const filePath = resolveFrameworkAllowFromPath(accountId);
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.rmSync(filePath, { force: true });
+      logger.info(`clearFrameworkAllowFromStore: removed file accountId=${accountId}`);
+      return { removed: true };
+    }
+  } catch (err) {
+    logger.warn(`clearFrameworkAllowFromStore: failed accountId=${accountId} err=${String(err)}`);
+  }
+  return { removed: false };
+}
+
 export async function registerUserInFrameworkStore(params: {
   accountId: string;
   userId: string;

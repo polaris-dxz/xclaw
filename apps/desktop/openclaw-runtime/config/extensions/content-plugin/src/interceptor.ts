@@ -7,13 +7,13 @@ import {
   checkSlicesParallel,
   generateTraceparent,
   generateTraceId,
+  writeSecurityLog,
 } from "./utils";
 import { stripPromptMetadata } from "./service";
 import { checkContentSecurity } from "./security";
 import {
   getSessionId,
   ensureQAIDForTurn,
-  markSessionBlocked,
   isSessionBlocked,
   clearSessionBlocked,
   addBlockedContent,
@@ -31,8 +31,6 @@ import {
 const PROMPT_MAX_LENGTH = 4000;
 
 const OUTPUT_MAX_LENGTH = 120;
-
-// ==================== 拦截器全局状态管理 ====================
 
 const FETCH_INTERCEPTOR_STATE = Symbol.for("openclaw.contentSecurity.fetchInterceptorState");
 
@@ -62,10 +60,101 @@ const getFetchInterceptorState = (): FetchInterceptorState => {
   return globalState[FETCH_INTERCEPTOR_STATE]!;
 };
 
-const logInterceptorDebug = (phase: string, data: Record<string, unknown>): void => {
-  console.log(`[content-security] ${phase}`, data);
+
+
+/** phase → 可读标签映射，方便日志一眼区分类别 */
+const PHASE_LABEL: Record<string, string> = {
+  // LLM 请求 / 返回
+  llm_request:            "LLM→  请求发出",
+  llm_request_error:      "LLM✗  请求失败",
+  llm_response_received:  "←LLM  响应头",
+  llm_response_json:      "←LLM  响应体(JSON)",
+  // 输入送审 / 返回
+  audit_input_start:        "送审→  输入开始",
+  audit_input_slice_send:   "送审→  输入分片",
+  audit_input_slice_result: "←送审  输入结果",
+  audit_input_slice_result_degraded: "←送审 输入结果(降级)",
+  audit_input_end:          "←送审  输入汇总",
+  audit_input_end_degraded: "←送审 输入汇总(降级)",
+  // LLM 流体返回
+  llm_response_stream_body:  "←LLM  响应体(SSE流)",
+  // 输出送审 / 返回
+  audit_output_slice_send:   "送审→  输出分片",
+  audit_output_slice_result: "←送审  输出结果",
+  audit_output_slice_result_degraded: "←送审 输出结果(降级)",
+  audit_output_end_send:     "送审→  输出末尾",
+  audit_output_end_result:   "←送审  输出末尾结果",
+  audit_output_end_result_degraded: "←送审 输出末尾结果(降级)",
+  audit_output_json_send:    "送审→  输出(JSON)",
+  // session 写入
+  session_write_redact_input:  "→session 写入(输入拦截/REDACT)",
+  session_write_redact_output: "→session 写入(输出拦截/REDACT)",
 };
-// ==================== 日志工具 ====================
+
+const logInterceptorDebug = (phase: string, data: Record<string, unknown>): void => {
+  const label = PHASE_LABEL[phase] ?? phase;
+  writeSecurityLog(label, data);
+};
+
+// ==================== REDACT 区间过滤 ====================
+
+const messageHasRedact = (msg: any): boolean => {
+  if (!msg) return false;
+  if (typeof msg.content === "string") {
+    return msg.content.includes("<!--REDACT-->");
+  }
+  if (Array.isArray(msg.content)) {
+    return msg.content.some(
+        (part: any) => part.type === "text" && typeof part.text === "string" && part.text.includes("<!--REDACT-->"),
+    );
+  }
+  return false;
+};
+
+const filterRedactedMessages = (messages: any[]): any[] => {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+  // 标记需要移除的索引
+  const indicesToRemove = new Set<number>();
+
+  for (let i = 0; i < messages.length; i++) {
+    if (!messageHasRedact(messages[i])) continue;
+
+    // 找到该消息向前最近的 user 消息（含自身）
+    let rangeStart = i;
+    for (let j = i; j >= 0; j--) {
+      if (messages[j].role === "user") {
+        rangeStart = j;
+        break;
+      }
+    }
+
+    // 找到该消息向后下一条 user 消息（不含）
+    let rangeEnd = messages.length; // 默认到末尾
+    for (let j = i + 1; j < messages.length; j++) {
+      if (messages[j].role === "user") {
+        rangeEnd = j;
+        break;
+      }
+    }
+
+    // 标记区间内所有消息为需要移除
+    for (let j = rangeStart; j < rangeEnd; j++) {
+      indicesToRemove.add(j);
+    }
+  }
+
+  if (indicesToRemove.size === 0) return messages;
+
+  return messages.filter((_, idx) => !indicesToRemove.has(idx));
+};
+
+const EXTERNAL_BLOCK_PATTERNS: RegExp[] = [];
+
+const isExternalBlockedResponse = (content: string): boolean => {
+  if (!content || content.length === 0) return false;
+  return EXTERNAL_BLOCK_PATTERNS.some((pattern) => pattern.test(content));
+};
 
 // ==================== 核心：fetch 拦截器安装函数 ====================
 
@@ -74,12 +163,6 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
   interceptorState.setupAttempts += 1;
 
   if (interceptorState.installed) {
-    logInterceptorDebug("fetch_interceptor_install_skip", {
-      setupAttempts: interceptorState.setupAttempts,
-      triggerCount: interceptorState.triggerCount,
-      llmRequestCount: interceptorState.llmRequestCount,
-      outputAuditEndCount: interceptorState.outputAuditEndCount,
-    });
     return;
   }
 
@@ -109,20 +192,21 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
 
     const { traceparent } = generateTraceparent(roundTraceId, currentSpanId);
 
-    // ==================== 获取审核上下文 ====================
 
     const runtimeAuditCtx = getCurrentLlmAuditContext();
     const sessionKey = runtimeAuditCtx?.sessionKey || `fetch:${url}`;
     const turnKey = runtimeAuditCtx?.turnKey || roundTraceId;
 
-    // ==================== 请求体解析与输入审核 ====================
 
-    let jsonBody: any;  // 解析后的 JSON 请求体（如果是 JSON 格式的话）
-
+    let jsonBody: any;
+    // 标记当前请求是否为 OpenClaw 后台 Memory Compaction（增量记忆压缩）请求。
+    // Memory Compaction 是 OpenClaw 在 context 超过阈值时自动触发的后台行为，
+    // 用于将历史对话压缩成摘要以腾出 context window，不属于用户主动输入，
+    // 因此不需要走内容安全审核，直接放行。
+    let isMemoryCompactionRequest = false;
     if (options.body) {
       let rawBody: string | undefined;
 
-      // 将请求体统一转为字符串，支持 string / Uint8Array / ArrayBuffer 三种格式
       if (typeof options.body === "string") {
         rawBody = options.body;
       } else if (options.body instanceof Uint8Array || options.body instanceof ArrayBuffer) {
@@ -134,18 +218,32 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
         try {
           jsonBody = JSON.parse(rawBody);
         } catch {
-          // 不是 JSON 请求体（如 FormData、纯文本），跳过审核
         }
       }
 
-      // 如果成功解析为 JSON，开始进行输入侧的处理
       if (jsonBody) {
-        // 提取最后一条用户消息（即当前轮次用户的输入）
         const messagesToModerate = extractLastUserMessage(jsonBody);
 
-        // ==================== 清洗历史消息 ====================
+        // 提取最后一条 user 消息的前 300 字符，用于识别是否为 Memory Compaction 请求。
+        // 注意：必须在 filterRedactedMessages 之前提取原始内容，
+        // 否则若最后一条 user 消息恰好含有 REDACT 标记被过滤掉，会导致识别失败。
+        const lastUserMsgPreview = (() => {
+          if (!Array.isArray(jsonBody?.messages)) return "";
+          for (let i = jsonBody.messages.length - 1; i >= 0; i--) {
+            if (jsonBody.messages[i].role === "user") {
+              const c = jsonBody.messages[i].content;
+              const text = typeof c === "string" ? c : (Array.isArray(c) ? c.map((p: any) => p.text ?? "").join("") : "");
+              return text.slice(0, 300);
+            }
+          }
+          return "";
+        })();
+
+        // OpenClaw Memory Compaction 请求的最后一条 user 消息固定以 "You summarize a SEGMENT" 开头，
+        // 这是 OpenClaw 框架内部硬编码的 prompt 模板，不是用户输入，直接跳过内容安全审核。
+        isMemoryCompactionRequest = lastUserMsgPreview.startsWith("You summarize a SEGMENT");
+
         if (Array.isArray(jsonBody.messages)) {
-          // 找到最后一条 user 消息的索引，清洗时跳过它（当前输入不需要清洗）
           let lastUserMsgIndex = -1;
           for (let i = jsonBody.messages.length - 1; i >= 0; i--) {
             if (jsonBody.messages[i].role === "user") {
@@ -154,14 +252,25 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
             }
           }
 
-          // sanitizeMessages 会将历史消息中曾被阻断的内容替换为安全占位符
+          const redactFilteredMessages = filterRedactedMessages(jsonBody.messages);
+          const redactRemovedCount = jsonBody.messages.length - redactFilteredMessages.length;
+
+          if (redactRemovedCount > 0) {
+            jsonBody.messages = redactFilteredMessages;
+            lastUserMsgIndex = -1;
+            for (let i = jsonBody.messages.length - 1; i >= 0; i--) {
+              if (jsonBody.messages[i].role === "user") {
+                lastUserMsgIndex = i;
+                break;
+              }
+            }
+          }
+
           const sanitizedCount = sanitizeMessages(jsonBody.messages, lastUserMsgIndex);
 
-          if (sanitizedCount > 0) {
-            // 清洗后需要将修改后的 messages 重新序列化回 options.body
+          if (redactRemovedCount > 0 || sanitizedCount > 0) {
             const newBody = JSON.stringify(jsonBody);
 
-            // 根据原始 body 的类型，用对应格式写回
             if (typeof options.body === "string") {
               options.body = newBody;
             } else if (options.body instanceof Uint8Array) {
@@ -171,7 +280,6 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
               options.body = encoded.buffer;
             }
 
-            // 更新 args[1] 以确保修改生效（因为 options 可能是 args[1] 的浅拷贝）
             args[1] = options;
           }
         }
@@ -180,32 +288,12 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
           if (messagesToModerate.length > 0) {
             clearSessionBlocked(sessionKey);
           } else {
-            const blockMessage = `<!--CONTENT_SECURITY_BLOCK-->抱歉该任务处理异常，请更换任务再尝试，为保障使用，该问答将在3秒被删除。`;
-
-            const sseChunk = JSON.stringify({
-              id: `block-${Date.now()}`,
-              object: "chat.completion.chunk",
-              created: Math.floor(Date.now() / 1000),
-              model: "content-security",
-              choices: [{
-                index: 0,
-                delta: { role: "assistant", content: blockMessage },
-                finish_reason: "stop",
-              }],
-            });
-            const sseBody = `data: ${sseChunk}\n\ndata: [DONE]\n\n`;
-
-            return new Response(sseBody, {
-              status: 200,
-              headers: {
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-              },
-            });
           }
         }
 
-        if (messagesToModerate.length > 0) {
+        // Memory Compaction 请求跳过输入送审；
+        // filterRedactedMessages 已在上方执行，REDACT 问答对不会被带入摘要。
+        if (messagesToModerate.length > 0 && !isMemoryCompactionRequest) {
           const msg = messagesToModerate[0];
 
           const sessionId = getSessionId(sessionKey);
@@ -213,56 +301,92 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
 
           const slices = sliceText(msg.content, PROMPT_MAX_LENGTH);
 
-          // 安全修复：遍历所有分片进行审核，防止超长内容截断绕过。
-          // 只对第一个分片做 stripPromptMetadata（元数据前缀只存在于消息开头）。
-          // 性能优化：prompt 类审核所有分片均为 SessionType.QUESTION，无顺序依赖，
-          // 使用 checkSlicesParallel 并发审核（含并发上限控制和批次间短路优化）。
+          logInterceptorDebug("audit_input_start", {
+            sessionKey,
+            qaid,
+            sliceCount: slices.length,
+            totalLength: msg.content.length,
+            contentPreview: msg.content.slice(0, 200),
+          });
+
           const inputBlocked = await checkSlicesParallel(
-            slices,
-            (slice, i) => {
-              const contentToCheck = i === 0 ? stripPromptMetadata(slice) : slice;
-              return checkContentSecurity(
-                api,
-                client,
-                "prompt",
-                [{ Data: contentToCheck, MediaType: "Text" }],
-                sessionId,
-                SessionType.QUESTION,
-                "llm_request",
-                enableLogging,
-                logTag,
-                qaid,
-                parentCtx,
-              );
-            },
+              slices,
+              async (slice, i) => {
+                const contentToCheck = i === 0 ? stripPromptMetadata(slice) : slice;
+                logInterceptorDebug("audit_input_slice_send", {
+                  sessionKey,
+                  qaid,
+                  sliceIndex: i,
+                  sliceLength: contentToCheck.length,
+                  contentPreview: contentToCheck.slice(0, 100),
+                });
+                const result = await checkContentSecurity(
+                    api,
+                    client,
+                    "prompt",
+                    [{ Data: contentToCheck, MediaType: "Text" }],
+                    sessionId,
+                    SessionType.QUESTION,
+                    "llm_request",
+                    enableLogging,
+                    logTag,
+                    qaid,
+                    parentCtx,
+                );
+                logInterceptorDebug(result.degraded ? "audit_input_slice_result_degraded" : "audit_input_slice_result", {
+                  sessionKey,
+                  qaid,
+                  sliceIndex: i,
+                  blocked: result.blocked,
+                  resultCode: result.resultCode ?? "",
+                  resultType: result.resultType ?? "",
+                  level: result.level ?? "",
+                  degraded: result.degraded ?? false,
+                  errorType: result.errorType ?? "",
+                  traceId: result.traceId ?? "",
+                  requestId: result.requestId ?? "",
+                });
+                return result;
+              },
           );
 
+          logInterceptorDebug("audit_input_end", {
+            sessionKey,
+            qaid,
+            blocked: inputBlocked,
+          });
+
           if (inputBlocked) {
-            // 标记会话为阻断状态（安全违规）
-            markSessionBlocked(sessionKey);
-            // 记录被阻断的内容，供后续 sanitizeMessages 清洗使用
-            addBlockedContent(msg.content);
 
-            const blockMessage = `<!--CONTENT_SECURITY_BLOCK-->抱歉该任务处理异常，请更换任务再尝试，为保障使用，该问答将在3秒后被删除。`;
-
+            const blockedReplyText = "<!--REDACT-->抱歉，这个问题我暂时无法解答，让我们换个话题吧~\n\n你可以试试让我帮你： 🔍 搜索与查询 · ✍️ 内容创作 · ⏰ 定时提醒 · ⚙️ 系统操作<!--/REDACT-->";
             const sseChunk = JSON.stringify({
-              id: `block-${Date.now()}`,
+              id: `blocked-${Date.now()}`,
               object: "chat.completion.chunk",
               created: Math.floor(Date.now() / 1000),
               model: "content-security",
               choices: [{
                 index: 0,
-                delta: { role: "assistant", content: blockMessage },
+                delta: { role: "assistant", content: blockedReplyText },
                 finish_reason: "stop",
               }],
             });
             const sseBody = `data: ${sseChunk}\n\ndata: [DONE]\n\n`;
+            const encoder = new TextEncoder();
 
-            return new Response(sseBody, {
+            logInterceptorDebug("session_write_redact_input", {
+              sessionKey,
+              qaid,
+              reason: "input_blocked",
+              content: blockedReplyText,
+            });
+
+            return new Response(encoder.encode(sseBody), {
               status: 200,
+              statusText: "OK",
               headers: {
                 "Content-Type": "text/event-stream",
                 "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
               },
             });
           }
@@ -278,14 +402,30 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
 
     if (isLLMRequest) {
       interceptorState.llmRequestCount += 1;
+      logInterceptorDebug("llm_request", {
+        seq: interceptorState.llmRequestCount,
+        url,
+        model: jsonBody?.model ?? "",
+        messageCount: Array.isArray(jsonBody?.messages) ? jsonBody.messages.length : 0,
+        lastUserMsgPreview: (() => {
+          if (!Array.isArray(jsonBody?.messages)) return "";
+          for (let i = jsonBody.messages.length - 1; i >= 0; i--) {
+            if (jsonBody.messages[i].role === "user") {
+              const c = jsonBody.messages[i].content;
+              const text = typeof c === "string" ? c : (Array.isArray(c) ? c.map((p: any) => p.text ?? "").join("") : "");
+              return text.slice(0, 200);
+            }
+          }
+          return "";
+        })(),
+        stream: jsonBody?.stream ?? false,
+      });
     }
 
-    // ==================== 触发延迟创建的 chat span ====================
     if (isLLMRequest) {
       consumePendingChatSpanCallback();
     }
 
-    // ==================== 注入 traceparent header ====================
 
     if (!options.headers) {
       options.headers = {};
@@ -309,33 +449,59 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
     }
     args[1] = options;
 
-    // ==================== 调用原始 fetch 发出请求 ====================
     let resp: Response;
+    const fetchStartTime = Date.now();
     try {
       resp = await originalFetch.apply(this, args as any);
     } catch (fetchError: any) {
+      if (isLLMRequest) {
+        logInterceptorDebug("llm_request_error", {
+          url,
+          error: (fetchError as any)?.message ?? String(fetchError),
+          durationMs: Date.now() - fetchStartTime,
+        });
+      }
       throw fetchError;
     }
 
-    // ==================== 输出内容安全审核 ====================
+    if (isLLMRequest) {
+      logInterceptorDebug("llm_response_received", {
+        url,
+        status: resp.status,
+        contentType: resp.headers.get("content-type") ?? "",
+        durationMs: Date.now() - fetchStartTime,
+      });
+    }
+
     if (isLLMRequest && resp.ok) {
       if (isSessionBlocked(sessionKey)) {
+        return resp;
+      }
+
+      // Memory Compaction 请求跳过输出送审，直接透传 LLM 响应给 OpenClaw 框架。
+      if (isMemoryCompactionRequest) {
         return resp;
       }
 
       const sessionId = getSessionId(sessionKey);
       const qaid = ensureQAIDForTurn(sessionKey, turnKey);
 
-      const auditOutputSlices = async (assistantContent: string, source: string): Promise<void> => {
+      const auditOutputSlices = async (
+        assistantContent: string,
+        source: string,
+        finalSessionType: SessionType = SessionType.ANSWER_END,
+      ): Promise<void> => {
         if (assistantContent.length === 0) {
-          interceptorState.outputAuditEndCount += 1;
+          if (finalSessionType === SessionType.ANSWER_END) {
+            interceptorState.outputAuditEndCount += 1;
+          }
           const emptyResult = await checkContentSecurity(
               api,
               client,
               "output",
               [{ Data: "", MediaType: "Text" }],
               sessionId,
-              SessionType.ANSWER_END,
+              finalSessionType,
               source,
               enableLogging,
               logTag,
@@ -349,9 +515,9 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
 
         for (let i = 0; i < slices.length; i++) {
           const isLastSlice = i === slices.length - 1;
-          const sessionType = isLastSlice ? SessionType.ANSWER_END : SessionType.ANSWER;
+          const sessionType = isLastSlice ? finalSessionType : SessionType.ANSWER;
 
-          if (isLastSlice) {
+          if (isLastSlice && finalSessionType === SessionType.ANSWER_END) {
             interceptorState.outputAuditEndCount += 1;
           }
 
@@ -383,47 +549,80 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
           const encoder = new TextEncoder();
 
           let auditBuffer = "";
+          let fullContent = "";
           let sliceIndex = 0;
           let lineBuf = "";
-          let detectedModelError = false;
-          let detectedFinishReason = "";
+          let outputBlocked = false;
+          let blockedReasonDetail: Record<string, unknown> = {};
+          let blockedResponseSent = false;
+          let receivedDone = false;
+          let lastFinishReason: string | null = null;
+          let pullCallCount = 0;
+          let enqueuedChunkCount = 0;
+          let sseErrorMessage: string | null = null;
+          const streamStartTime = performance.now();
 
           const parseDeltaContent = (line: string): string => {
             if (!line.startsWith("data:")) return "";
             const dataStr = line.slice(5).trim();
-            if (dataStr === "[DONE]") return "";
+            if (dataStr === "[DONE]") {
+              receivedDone = true;
+              return "";
+            }
             try {
               const json = JSON.parse(dataStr);
               if (Array.isArray(json.choices) && json.choices.length > 0) {
                 const choice = json.choices[0];
                 const delta = choice.delta;
-
-                if (choice.finish_reason) {
-                  detectedFinishReason = choice.finish_reason;
-                  // content_filter 表示模型主动过滤了内容，视为模型错误
-                  if (choice.finish_reason === "content_filter") {
-                    detectedModelError = true;
-                  }
-                }
-
                 if (delta && typeof delta.content === "string") {
                   return delta.content;
                 }
               }
             } catch {
-              // JSON 解析失败，忽略这一行
             }
             return "";
           };
 
+          const parseFinishReason = (line: string): string | null => {
+            if (!line.startsWith("data:")) return null;
+            const dataStr = line.slice(5).trim();
+            if (dataStr === "[DONE]") return null;
+            try {
+              const json = JSON.parse(dataStr);
+              if (Array.isArray(json.choices) && json.choices.length > 0) {
+                const finishReason = json.choices[0]?.finish_reason;
+                if (finishReason) return finishReason;
+              }
+              if (json.stopReason) return json.stopReason;
+              if (json.stop_reason) return json.stop_reason;
+              if (json.error) {
+                // 提取业务错误信息，用于后续透传给用户
+                if (typeof json.error.message === "string" && json.error.message.length > 0) {
+                  sseErrorMessage = json.error.message;
+                }
+                return "error";
+              }
+            } catch {
+              // 忽略
+            }
+            return null;
+          };
+
           const flushAuditBuffer = async (): Promise<void> => {
             while (auditBuffer.length >= OUTPUT_MAX_LENGTH) {
-              // 取出一个切片
               const slice = auditBuffer.slice(0, OUTPUT_MAX_LENGTH);
               auditBuffer = auditBuffer.slice(OUTPUT_MAX_LENGTH);
               sliceIndex++;
 
-              // 发送中间切片的审核请求（类型为 ANSWER，非 ANSWER_END）
+              logInterceptorDebug("audit_output_slice_send", {
+                sessionKey,
+                qaid,
+                sliceIndex,
+                sliceLength: slice.length,
+                contentPreview: slice.slice(0, 100),
+                sessionType: "ANSWER",
+              });
+
               const result = await checkContentSecurity(
                   api,
                   client,
@@ -438,111 +637,170 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
                   parentCtx,
               );
 
+              logInterceptorDebug(result.degraded ? "audit_output_slice_result_degraded" : "audit_output_slice_result", {
+                sessionKey,
+                qaid,
+                sliceIndex,
+                blocked: result.blocked,
+                resultCode: result.resultCode ?? "",
+                resultType: result.resultType ?? "",
+                level: result.level ?? "",
+                degraded: result.degraded ?? false,
+                errorType: result.errorType ?? "",
+                traceId: result.traceId ?? "",
+                requestId: result.requestId ?? "",
+              });
+
               if (result.blocked) {
-                // 内容安全审核阻断：设置 detectedModelError 标志，
-                // 下次 pull() 调用时会触发 interceptStream 拦截流
-                detectedModelError = true;
-                markSessionBlocked(sessionKey);
+                outputBlocked = true;
+                blockedReasonDetail = {
+                  source: "audit_output_slice",
+                  sliceIndex,
+                  resultCode: result.resultCode ?? "",
+                  resultType: result.resultType ?? "",
+                  level: result.level ?? "",
+                  degraded: result.degraded ?? false,
+                  traceId: result.traceId ?? "",
+                  requestId: result.requestId ?? "",
+                };
                 addBlockedContent(slice);
-                // 跳出循环，不再继续审核后续切片
                 break;
               }
             }
           };
 
-          let streamIntercepted = false;
+          const enqueueBlockedMarker = (controller: ReadableStreamDefaultController): void => {
+            if (blockedResponseSent) return;
+            blockedResponseSent = true;
 
-          const interceptStream = (controller: ReadableStreamDefaultController): void => {
-            streamIntercepted = true;
+            logInterceptorDebug("llm_response_stream_body", {
+              url,
+              totalLength: fullContent.length,
+              blocked: true,
+              blockedReasonDetail,
+              content: fullContent,
+            });
 
-            markSessionBlocked(sessionKey);
-            // 构造阻断提示消息
-            const blockMessage = `<!--CONTENT_SECURITY_BLOCK-->抱歉该任务处理异常，请更换任务再尝试，为保障使用，该问答将在3秒后被删除`;
-
-            // 构造 SSE 格式的阻断 chunk
-            const sseChunk = JSON.stringify({
-              id: `block-model-error-${Date.now()}`,
+            const blockedReplyText = "<!--REDACT-->抱歉，这个问题我暂时无法解答，让我们换个话题吧~\n\n你可以试试让我帮你： 🔍 搜索与查询 · ✍️ 内容创作 · ⏰ 定时提醒 · ⚙️ 系统操作<!--/REDACT-->";
+            const llmFinishReason = "stop";
+            const redactChunk = JSON.stringify({
+              id: `output-blocked-${Date.now()}`,
               object: "chat.completion.chunk",
               created: Math.floor(Date.now() / 1000),
               model: "content-security",
               choices: [{
                 index: 0,
-                delta: { role: "assistant", content: blockMessage },
-                finish_reason: "stop",
+                delta: { content: blockedReplyText },
+                finish_reason: llmFinishReason,
               }],
             });
-            const sseBody = `data: ${sseChunk}\n\ndata: [DONE]\n\n`;
+            controller.enqueue(encoder.encode(`data: ${redactChunk}\n\n`));
+            controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
 
-            // 将阻断消息推送到上层消费者
-            controller.enqueue(encoder.encode(sseBody));
+            const blockedAtMs = (performance.now() - streamStartTime).toFixed(1);
 
-            // 异步消费剩余的流数据，防止连接/资源泄漏
-            (async () => {
-              try {
-                while (true) {
-                  const { done } = await reader.read();
-                  if (done) break;
-                }
-              } catch {
-                // 忽略消费残余数据时的错误
+            try {
+              controller.close();
+            } catch {
+            }
+
+            try {
+              reader.cancel();
+            } catch {
+            }
+
+            (() => {
+              const sourceMap: Record<string, string> = {
+                audit_output_slice:       "送审命中",
+                llm_finish_reason:        "LLM截断",
+                external_blocked_response: "话术检测",
+              };
+              const src = String(blockedReasonDetail.source ?? "");
+              const srcLabel = sourceMap[src] ?? src;
+              let reasonSuffix = srcLabel;
+              if (src === "audit_output_slice") {
+                reasonSuffix = `${srcLabel} resultCode=${blockedReasonDetail.resultCode} resultType=${blockedReasonDetail.resultType} level=${blockedReasonDetail.level} slice#${blockedReasonDetail.sliceIndex}`;
+              } else if (src === "llm_finish_reason") {
+                reasonSuffix = `${srcLabel}(${blockedReasonDetail.finishReason})`;
               }
-            })();
-
-            // 发送 ANSWER_END 审核通知（告知安全服务本轮回答结束）
-            interceptorState.outputAuditEndCount += 1;
-
-            // 将审核缓冲区中剩余的内容作为最后一个切片发送审核
-            checkContentSecurity(
-                api,
-                client,
-                "output",
-                [{ Data: auditBuffer, MediaType: "Text" }],
-                sessionId,
-                SessionType.ANSWER_END,
-                "llm_response_sse",
-                enableLogging,
-                logTag,
+              const label = `→session 写入(输出拦截/REDACT) ⛔ ${reasonSuffix}`;
+              writeSecurityLog(label, {
+                url,
+                sessionKey,
                 qaid,
-                parentCtx,
-            ).then((interceptResult) => {
-            }).catch((e) => {
-            });
-
-            // 关闭流
-            controller.close();
+                blockedReasonDetail,
+                llmOriginalLength: fullContent.length,
+                llmOriginalPreview: fullContent.slice(0, 200),
+                content: blockedReplyText,
+              });
+            })();
           };
 
-          // ==================== 创建转换后的可读流 ====================
           const transformedStream = new ReadableStream({
+            start(_controller) {
+              // no-op
+            },
             async pull(controller) {
-              // 流已被拦截，不再处理
-              if (streamIntercepted) return;
-
               try {
                 const { done, value } = await reader.read();
 
                 if (done) {
-                  // ===== 流结束处理 =====
+                  if (blockedResponseSent) {
+                    return;
+                  }
 
                   if (lineBuf.trim()) {
                     const content = parseDeltaContent(lineBuf);
                     if (content) {
                       auditBuffer += content;
+                      fullContent += content;
                     }
-                  }
-
-
-                  if (detectedModelError) {
-                    interceptStream(controller);
-                    return;
                   }
 
                   sliceIndex++;
 
+                  if (!outputBlocked && !receivedDone && lastFinishReason === null && auditBuffer.length > 0) {
+                    outputBlocked = true;
+                    addBlockedContent(auditBuffer);
+                    enqueueBlockedMarker(controller);
+                    return;
+                  }
+
+                  if (!outputBlocked && isExternalBlockedResponse(auditBuffer)) {
+                    outputBlocked = true;
+                    enqueueBlockedMarker(controller);
+                    return;
+                  }
+                  if (outputBlocked) {
+                    enqueueBlockedMarker(controller);
+                    return;
+                  }
+
+                  logInterceptorDebug("llm_response_stream_body", {
+                    url,
+                    totalLength: fullContent.length,
+                    content: fullContent,
+                  });
+
                   controller.close();
 
                   setTimeout(() => {
-                    interceptorState.outputAuditEndCount += 1;
+                    // finish_reason 为 tool_calls 表示中间轮次，用 ANSWER；stop 或无 finish_reason 表示最终轮次，用 ANSWER_END
+                    const isIntermediateRound = lastFinishReason === "tool_calls";
+                    const auditSessionType = isIntermediateRound ? SessionType.ANSWER : SessionType.ANSWER_END;
+
+                    if (!isIntermediateRound) {
+                      interceptorState.outputAuditEndCount += 1;
+                    }
+
+                    logInterceptorDebug("audit_output_end_send", {
+                      sessionKey,
+                      qaid,
+                      bufferLength: auditBuffer.length,
+                      contentPreview: auditBuffer.slice(0, 200),
+                      sessionType: isIntermediateRound ? "ANSWER" : "ANSWER_END",
+                      lastFinishReason,
+                    });
 
                     checkContentSecurity(
                         api,
@@ -550,16 +808,26 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
                         "output",
                         [{ Data: auditBuffer, MediaType: "Text" }],
                         sessionId,
-                        SessionType.ANSWER_END,
+                        auditSessionType,
                         "llm_response_sse",
                         enableLogging,
                         logTag,
                         qaid,
                         parentCtx,
                     ).then((endResult) => {
-                      // 但仍需标记会话阻断状态，使后续 Agent Runner 重试请求被拦截
+                      logInterceptorDebug(endResult.degraded ? "audit_output_end_result_degraded" : "audit_output_end_result", {
+                        sessionKey,
+                        qaid,
+                        blocked: endResult.blocked,
+                        resultCode: endResult.resultCode ?? "",
+                        resultType: endResult.resultType ?? "",
+                        level: endResult.level ?? "",
+                        degraded: endResult.degraded ?? false,
+                        errorType: endResult.errorType ?? "",
+                        traceId: endResult.traceId ?? "",
+                        requestId: endResult.requestId ?? "",
+                      });
                       if (endResult.blocked) {
-                        markSessionBlocked(sessionKey);
                         addBlockedContent(auditBuffer);
                       }
                     }).catch((e) => {
@@ -569,35 +837,95 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
                   return;
                 }
 
-                // ===== 处理正常的流数据 chunk =====
+                if (outputBlocked) {
+                  return;
+                }
 
                 lineBuf += decoder.decode(value, { stream: true });
 
                 const lines = lineBuf.split("\n");
                 lineBuf = lines.pop() || "";
 
+                // 逐行过滤，只收集正常内容行，跳过 error 行，避免原始字节直接透传
+                const safeLines: string[] = [];
+                let hitError = false;
+
                 for (const line of lines) {
+                  // if (line.trim()) {
+                  //   logInterceptorDebug("sse_raw_line", {
+                  //     sessionKey,
+                  //     qaid,
+                  //     line,
+                  //   });
+                  // }
+                  const finishReason = parseFinishReason(line);
+                  if (finishReason && finishReason !== "content_filter" && finishReason !== "error") {
+                    lastFinishReason = finishReason;
+                  }
+                  if (finishReason === "content_filter" || finishReason === "error") {
+                    // 如果是业务错误（如服务繁忙），透传错误信息给用户，不走 REDACT 拦截
+                    if (finishReason === "error" && sseErrorMessage) {
+                      hitError = true;
+                      break;
+                    }
+                    outputBlocked = true;
+                    blockedReasonDetail = { source: "llm_finish_reason", finishReason };
+                    addBlockedContent(auditBuffer);
+                    enqueueBlockedMarker(controller);
+                    return;
+                  }
                   const content = parseDeltaContent(line);
                   if (content) {
                     auditBuffer += content;
+                    fullContent += content;
                   }
+                  safeLines.push(line);
                 }
 
-                if (detectedModelError) {
-                  interceptStream(controller);
+                // 检测到业务错误：丢弃已积累的 <think> 等内容，直接透传错误信息
+                if (hitError) {
+                  const encoder2 = new TextEncoder();
+                  const errChunk = JSON.stringify({
+                    id: `error-${Date.now()}`,
+                    object: "chat.completion.chunk",
+                    created: Math.floor(Date.now() / 1000),
+                    model: "content-security",
+                    choices: [{
+                      index: 0,
+                      delta: { role: "assistant", content: sseErrorMessage },
+                      finish_reason: "stop",
+                    }],
+                  });
+                  controller.enqueue(encoder2.encode(`data: ${errChunk}\n\n`));
+                  controller.enqueue(encoder2.encode(`data: [DONE]\n\n`));
+                  try { controller.close(); } catch { }
+                  try { reader.cancel(); } catch { }
                   return;
                 }
 
-                controller.enqueue(value);
+                pullCallCount++;
+                if (isExternalBlockedResponse(auditBuffer)) {
+                  outputBlocked = true;
+                  blockedReasonDetail = { source: "external_blocked_response", auditBufferPreview: auditBuffer.slice(0, 100) };
+                  addBlockedContent(auditBuffer);
+                  enqueueBlockedMarker(controller);
+                  return;
+                }
+
+                // 只 enqueue 过滤后的安全行，而非原始 value
+                if (safeLines.length > 0) {
+                  const safeChunk = safeLines.join("\n") + "\n";
+                  enqueuedChunkCount++;
+                  controller.enqueue(encoder.encode(safeChunk));
+                }
 
                 await flushAuditBuffer();
 
-                if (detectedModelError) {
-                  interceptStream(controller);
+                if (outputBlocked) {
+                  enqueueBlockedMarker(controller);
                   return;
                 }
               } catch (e) {
-                // 流处理出错，关闭流
                 controller.close();
               }
             },
@@ -610,19 +938,86 @@ export const setupFetchInterceptor = (config: InterceptorConfig, logTag: string 
           });
         }
       } else {
-        // ==================== JSON 格式响应审核 ====================
         const clonedResp = resp.clone();
 
-        (async () => {
-          try {
-            const respBody = await clonedResp.json();
-            const assistantContent = extractAssistantContent(respBody);
+        try {
+          const respBody = await clonedResp.json();
 
-            await auditOutputSlices(assistantContent, "llm_response_json");
-          } catch (e) {
-            // JSON 解析失败或审核出错，忽略（不影响响应返回）
+          logInterceptorDebug("llm_response_json", {
+            url,
+            stopReason: respBody?.stopReason ?? respBody?.stop_reason ?? "",
+            hasChoices: Array.isArray(respBody?.choices),
+            choiceCount: Array.isArray(respBody?.choices) ? respBody.choices.length : 0,
+          });
+
+          if (respBody?.stopReason === "error" || respBody?.stop_reason === "error") {
+            const errorMessage: string | undefined = respBody?.errorMessage;
+            const encoder = new TextEncoder();
+
+            // 如果有 errorMessage，说明是业务错误（如服务繁忙），直接透传给用户，不走 REDACT 拦截
+            if (errorMessage) {
+              const sseChunk = JSON.stringify({
+                id: `error-${Date.now()}`,
+                object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000),
+                model: "content-security",
+                choices: [{
+                  index: 0,
+                  delta: { role: "assistant", content: errorMessage },
+                  finish_reason: "stop",
+                }],
+              });
+              const sseBody = `data: ${sseChunk}\n\ndata: [DONE]\n\n`;
+              return new Response(encoder.encode(sseBody), {
+                status: 200,
+                statusText: "OK",
+                headers: {
+                  "Content-Type": "text/event-stream",
+                  "Cache-Control": "no-cache",
+                  "Connection": "keep-alive",
+                },
+              });
+            }
+
+            // 没有 errorMessage，视为内容安全拦截，走 REDACT 流程
+            addBlockedContent(JSON.stringify(respBody));
+            const blockedReplyText = "<!--REDACT-->抱歉，这个问题我暂时无法解答，让我们换个话题吧~\n\n你可以试试让我帮你： 🔍 搜索与查询 · ✍️ 内容创作 · ⏰ 定时提醒 · ⚙️ 系统操作<!--/REDACT-->";
+            const sseChunk = JSON.stringify({
+              id: `blocked-${Date.now()}`,
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: "content-security",
+              choices: [{
+                index: 0,
+                delta: { role: "assistant", content: blockedReplyText },
+                finish_reason: "llm_output_error",
+              }],
+            });
+            const sseBody = `data: ${sseChunk}\n\ndata: [DONE]\n\n`;
+            return new Response(encoder.encode(sseBody), {
+              status: 200,
+              statusText: "OK",
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+              },
+            });
           }
-        })();
+
+          const assistantContent = extractAssistantContent(respBody);
+
+          logInterceptorDebug("audit_output_json_send", {
+            sessionKey,
+            qaid,
+            contentLength: assistantContent.length,
+            contentPreview: assistantContent.slice(0, 200),
+          });
+
+          auditOutputSlices(assistantContent, "llm_response_json").catch(() => {});
+        } catch (e) {
+          // JSON 解析失败或审核出错，忽略（不影响响应返回）
+        }
       }
     }
 
