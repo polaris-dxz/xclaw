@@ -368,6 +368,36 @@ function syncExternalOpenClawAgentAuthProfiles(paths, agentId = 'main') {
   }
 }
 
+function ensureEmbeddedAgentAuthProfiles(paths, config, agentId = 'main') {
+  try {
+    const agentDir = path.join(paths.stateDir, 'agents', agentId, 'agent')
+    const authPath = path.join(agentDir, 'auth-profiles.json')
+    const auth = readJsonObject(authPath) || { version: 1, profiles: {}, lastGood: {} }
+    if (!auth.profiles || typeof auth.profiles !== 'object') auth.profiles = {}
+    if (!auth.lastGood || typeof auth.lastGood !== 'object') auth.lastGood = {}
+
+    const providers = config?.models?.providers && typeof config.models.providers === 'object' ? config.models.providers : {}
+    const minimax = providers?.minimax && typeof providers.minimax === 'object' ? providers.minimax : null
+    const minimaxKey = minimax ? String(minimax.apiKey || '').trim() : ''
+    const minimaxApi = minimax ? String(minimax.api || '').trim() : ''
+    const minimaxBaseUrl = minimax ? String(minimax.baseUrl || '').trim() : ''
+
+    // Some runtimes treat `anthropic-messages` as requiring `provider=anthropic` auth.
+    // When MiniMax is configured in anthropic-messages compatibility mode, mirror its key to an anthropic profile.
+    if (minimaxKey && minimaxApi === 'anthropic-messages' && minimaxBaseUrl.includes('minimaxi')) {
+      const profileId = 'anthropic:default'
+      if (!auth.profiles[profileId]) {
+        auth.profiles[profileId] = { type: 'api_key', provider: 'anthropic', key: minimaxKey }
+        auth.lastGood.anthropic = profileId
+        ensureDirExists(agentDir)
+        fs.writeFileSync(authPath, `${JSON.stringify(auth, null, 2)}\n`, 'utf8')
+      }
+    }
+  } catch (error) {
+    console.warn(`[openclaw] ensure embedded auth profiles failed: ${error.message}`)
+  }
+}
+
 function ensureEmbeddedOpenClawConfig(paths) {
   ensureDirExists(paths.stateDir)
   ensureDirExists(paths.workspaceDir)
@@ -392,10 +422,29 @@ function ensureEmbeddedOpenClawConfig(paths) {
     delete config.agents.defaults.model.primary
   }
 
+  // OpenClaw validates config schema strictly. XClaw may store UI-only metadata
+  // inside ~/.xclaw/openclaw.json (e.g. provider display fields, managed keys).
+  // Strip unknown keys before handing the config to embedded OpenClaw.
+  if (config.xclaw && typeof config.xclaw === 'object') {
+    delete config.xclaw
+  }
+
   if (config.models && typeof config.models === 'object') {
     const providers = config.models.providers
     if (providers && typeof providers === 'object' && providers.xclaw) {
       delete providers.xclaw
+    }
+    if (providers && typeof providers === 'object') {
+      for (const k of Object.keys(providers)) {
+        const p = providers[k]
+        if (!p || typeof p !== 'object') continue
+        // These fields are used by XClaw UI but not recognized by OpenClaw core schema.
+        delete p.name
+        delete p.notes
+        delete p.website
+        delete p.displayName
+        delete p.xclawManaged
+      }
     }
     if (providers && typeof providers === 'object' && Object.keys(providers).length === 0) {
       delete config.models.providers
@@ -460,6 +509,7 @@ function ensureEmbeddedOpenClawConfig(paths) {
   sanitizeEmbeddedOpenClawPluginsAndChannels(config, discoveredIds)
 
   syncExternalOpenClawAgentAuthProfiles(paths, 'main')
+  ensureEmbeddedAgentAuthProfiles(paths, config, 'main')
 
   fs.writeFileSync(paths.configPath, `${JSON.stringify(config, null, 2)}\n`)
   return config
