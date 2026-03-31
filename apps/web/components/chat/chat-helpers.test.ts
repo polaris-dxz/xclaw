@@ -7,6 +7,7 @@ import {
   extractLeadingJsonObject,
   looksLikeGatewayToolProcessJson,
   stripOpenClawAssistantFooter,
+  stripAssistantXmlFinalWrapper,
   isGatewaySyntheticUserContext,
   isThinkingProcessMessage,
   groupMessagesForDisplay,
@@ -48,6 +49,28 @@ describe('stripOpenClawAssistantFooter', () => {
 
   it('leaves unrelated text unchanged', () => {
     expect(stripOpenClawAssistantFooter('你好')).toBe('你好')
+  })
+})
+
+describe('stripAssistantXmlFinalWrapper', () => {
+  it('removes outer final tags and leaves body', () => {
+    const body = '<final>第一段\n\n第二段</final>'
+    expect(stripAssistantXmlFinalWrapper(body)).toBe('第一段\n\n第二段')
+  })
+
+  it('handles case-insensitive tags and strips nested wrappers', () => {
+    expect(stripAssistantXmlFinalWrapper('<FINAL>x</FINAL>')).toBe('x')
+    expect(stripAssistantXmlFinalWrapper('<final><final>y</final></final>')).toBe('y')
+  })
+
+  it('strips lone opening or closing tag when not paired', () => {
+    expect(stripAssistantXmlFinalWrapper('<final>hello')).toBe('hello')
+    expect(stripAssistantXmlFinalWrapper('world</final>')).toBe('world')
+  })
+
+  it('works before footer strip in pipeline', () => {
+    const raw = '<final>答</final>\n\n🦞 OpenClaw 2026\n🧵 Session: x'
+    expect(stripOpenClawAssistantFooter(stripAssistantXmlFinalWrapper(raw))).toBe('答')
   })
 })
 

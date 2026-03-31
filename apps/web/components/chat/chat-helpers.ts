@@ -164,6 +164,26 @@ export function stripAssistantXmlFinalWrapper(raw: string): string {
  * OpenClaw 常在助手回复末尾拼接版本、Token、Context、Session key、Queue 等元信息（通常以「🦞 OpenClaw」起头），
  * 不应在聊天主区域当正文展示。
  */
+/**
+ * 部分模型会把最终回复包在 `final` 阶段 XML 标签中；这是内部标记，不应展示给用户。
+ * 从正文开头成对剥离（`</final>` 后可能还有 OpenClaw 页脚等，不能用整串 `$` 匹配）。
+ */
+export function stripAssistantXmlFinalWrapper(raw: string): string {
+  let t = String(raw ?? '').trim()
+  if (!t) return String(raw ?? '')
+
+  const pairFromStart = /^<final\b[^>]*>\s*([\s\S]*?)\s*<\/final\b[^>]*>/i
+  for (let i = 0; i < 8; i += 1) {
+    const m = t.match(pairFromStart)
+    if (!m) break
+    const rest = t.slice(m[0].length)
+    t = (m[1].trim() + rest).trimStart()
+  }
+  t = t.replace(/^<final\b[^>]*>\s*/i, '')
+  t = t.replace(/\s*<\/final\b[^>]*>$/i, '')
+  return t.trimEnd()
+}
+
 export function stripOpenClawAssistantFooter(raw: string): string {
   const text = String(raw ?? '')
   const trimmed = text.trim()
