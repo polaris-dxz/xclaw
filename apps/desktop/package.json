@@ -14,7 +14,7 @@
     "pack": "npm run prepare:openclaw-runtime && npm run build:selection-sidecar && electron-builder --config electron-builder.json --dir --publish never"
   },
   "devDependencies": {
-    "electron": "^35.7.5",
+    "electron": "^39.8.4",
     "electron-builder": "^25.0.0",
     "wait-on": "^8.0.0"
   }
