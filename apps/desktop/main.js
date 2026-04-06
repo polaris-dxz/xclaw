@@ -8,6 +8,33 @@ const path = require('path')
 
 const isDev = process.env.NODE_ENV !== 'production'
 
+/** 与菜单栏、About 面板一致的应用展示名（开发模式下 `electron .` 默认会显示 Electron） */
+const APP_DISPLAY_NAME = 'XClaw'
+
+/**
+ * macOS：自定义「关于」面板文案与可选图标（需存在 public/about-icon.png）。
+ * 打包后 Dock/程序坞图标由 electron-builder 的 `mac.icon`（.icns）决定。
+ */
+function applyMacAboutPanelOptions() {
+  if (process.platform !== 'darwin') return
+  const aboutIconPng = path.join(__dirname, 'public', 'about-icon.png')
+  const opts = {
+    applicationName: APP_DISPLAY_NAME,
+    applicationVersion: app.getVersion(),
+    copyright: 'Copyright © 2026 XClaw',
+  }
+  if (fs.existsSync(aboutIconPng)) {
+    opts.iconPath = aboutIconPng
+  }
+  try {
+    app.setAboutPanelOptions(opts)
+  } catch (e) {
+    console.warn('[about] setAboutPanelOptions failed:', e.message)
+  }
+}
+
+app.setName(APP_DISPLAY_NAME)
+
 const GITHUB_RELEASE_OWNER = 'polaris-dxz'
 const GITHUB_RELEASE_REPO = 'xclaw'
 
@@ -1123,6 +1150,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   installOpenClawGatewayOriginHeaderFix()
+  applyMacAboutPanelOptions()
   await startEmbeddedOpenClaw()
   await startStudioBackend()
   startSelectionSidecar()
@@ -1394,7 +1422,7 @@ function installMacApplicationMenu() {
   const handlers = buildShellCommandMenuClickHandlers()
   const template = [
     {
-      label: app.name,
+      label: APP_DISPLAY_NAME,
       submenu: [
         { role: 'about' },
         { type: 'separator' },
