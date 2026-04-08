@@ -4,6 +4,6 @@
   "private": true,
   "dependencies": {
     "node": "22.16.0",
-    "openclaw": "2026.3.13"
+    "openclaw": "2026.4.2"
   }
 }
