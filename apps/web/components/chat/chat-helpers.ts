@@ -1,4 +1,9 @@
 import type { ChatMessage, CurrentUser } from '@/store'
+import {
+  isUntrustedSenderEnvelopeContent,
+  stripUntrustedSenderMetadataEnvelope,
+} from '../../lib/chat-messages/untrusted-sender-envelope'
+import { matchAnyOpenclawGatewayInfraPayload } from '../../lib/chat-messages/openclaw-infra-tool-json'
 
 type ConversationLike = {
   id: string
@@ -136,6 +141,26 @@ export function looksLikeGatewayToolErrorJson(content: string): boolean {
 }
 
 /**
+ * 部分模型会把最终回复包在 `final` 阶段 XML 标签中；这是内部标记，不应展示给用户。
+ * 从正文开头成对剥离（`</final>` 后可能还有 OpenClaw 页脚等，不能用整串 `$` 匹配）。
+ */
+export function stripAssistantXmlFinalWrapper(raw: string): string {
+  let t = String(raw ?? '').trim()
+  if (!t) return String(raw ?? '')
+
+  const pairFromStart = /^<final\b[^>]*>\s*([\s\S]*?)\s*<\/final\b[^>]*>/i
+  for (let i = 0; i < 8; i += 1) {
+    const m = t.match(pairFromStart)
+    if (!m) break
+    const rest = t.slice(m[0].length)
+    t = (m[1].trim() + rest).trimStart()
+  }
+  t = t.replace(/^<final\b[^>]*>\s*/i, '')
+  t = t.replace(/\s*<\/final\b[^>]*>$/i, '')
+  return t.trimEnd()
+}
+
+/**
  * OpenClaw 常在助手回复末尾拼接版本、Token、Context、Session key、Queue 等元信息（通常以「🦞 OpenClaw」起头），
  * 不应在聊天主区域当正文展示。
  */
@@ -154,6 +179,9 @@ export function stripOpenClawAssistantFooter(raw: string): string {
   return out.trimEnd()
 }
 
+/** 再导出，便于只引用 chat-helpers 的调用方 */
+export { stripUntrustedSenderMetadataEnvelope }
+
 /**
  * Gateway 会把「工具 JSON、会话启动指令、读入的 workspace 文件正文」等都以 role=user 写入历史，
  * 与真人输入共用 from_agent=user —— 这些不是用户气泡，应归入思考过程时间线。
@@ -161,6 +189,11 @@ export function stripOpenClawAssistantFooter(raw: string): string {
 export function isGatewaySyntheticUserContext(message: ChatMessage): boolean {
   const content = String(message.content || '')
   const t = content.trimStart()
+
+  /** 信封后仍有正文 → 视为人类轮次（仅包装脏），勿归入已隐藏的思考过程组 */
+  if (isUntrustedSenderEnvelopeContent(t)) {
+    return stripUntrustedSenderMetadataEnvelope(content).trim().length === 0
+  }
 
   if (looksLikeGatewayToolProcessJson(content)) return true
 
@@ -175,17 +208,29 @@ export function isGatewaySyntheticUserContext(message: ChatMessage): boolean {
   return false
 }
 
+function isOpenclawGatewayInfraMessage(message: ChatMessage): boolean {
+  if (message.message_type !== 'text') return false
+  return matchAnyOpenclawGatewayInfraPayload(String(message.content || '')) != null
+}
+
 export function isUserChatMessage(message: ChatMessage, currentUser: CurrentUser | null): boolean {
   const metadata = (message.metadata || {}) as Record<string, unknown>
   const senderType = String(metadata.senderType || '').toLowerCase()
   const from = String(message.from_agent || '').trim().toLowerCase()
 
-  /** 本机客户端 / 显式 senderType，始终以真人计（先于网关注入启发式） */
+  /** 本机客户端始终以真人计 */
   if (from === 'you') return true
+
+  /** 网关工具大块 JSON（sessions_list、openclaw.json 读取等）常有 senderType=user，必须先排除 */
+  if (isOpenclawGatewayInfraMessage(message)) return false
+
   if (senderType === 'user') return true
 
   /** Gateway 的 role=user 含工具回包与读文件内容，需排除后再认真人 */
   if (isGatewaySyntheticUserContext(message)) return false
+
+  /** jsonl 转录常见 from_agent 字面为 "user" */
+  if (from === 'user' && message.message_type === 'text') return true
 
   if (String(metadata.role || '').toLowerCase() === 'user') return true
 
@@ -253,6 +298,7 @@ export function isThinkingProcessMessage(message: ChatMessage, currentUser: Curr
   }
 
   if (message.message_type === 'text') {
+    if (isOpenclawGatewayInfraMessage(message)) return false
     if (looksLikeGatewayToolProcessJson(message.content)) return true
     if (isGatewaySyntheticUserContext(message)) return true
     if (phase === 'thinking') return true

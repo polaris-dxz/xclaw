@@ -400,6 +400,8 @@ export interface Message {
   content: string;
   message_type: string;
   metadata?: string; // JSON string
+  /** 与 OpenClaw 会话 jsonl 单行对齐的 JSON（通常含 type/message/timestamp） */
+  openclaw_event_json?: string | null;
   read_at?: number;
   created_at: number;
 }

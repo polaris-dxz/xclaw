@@ -28,4 +28,9 @@ describe('unwrapGatewayRpcResult', () => {
     const flat = { status: 'started', runId: 'r1' }
     expect(unwrapGatewayRpcResult(flat)).toEqual(flat)
   })
+
+  it('keeps { result } wrapper when inner is only agent.wait completion metadata (no rich fields)', () => {
+    const outer = { result: { runId: 'mc-1', status: 'ok', endedAt: 123 } }
+    expect(unwrapGatewayRpcResult(outer)).toEqual(outer)
+  })
 })

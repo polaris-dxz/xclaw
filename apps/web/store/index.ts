@@ -225,6 +225,8 @@ export interface ChatMessage {
   content: string
   message_type: 'text' | 'system' | 'handoff' | 'status' | 'command' | 'tool_call'
   metadata?: JsonValue
+  /** 解析自 messages.openclaw_event_json，与网关 jsonl 事件形状一致 */
+  openclaw_event?: JsonValue
   attachments?: ChatAttachment[]
   read_at?: number
   created_at: number
@@ -625,7 +627,10 @@ interface XClawStore {
   setHeaderDensity: (mode: 'focus' | 'compact') => void
 }
 
-export { shouldClearAwaitingReplyForMessage } from '@/lib/awaiting-reply'
+export {
+  hasPersistedAssistantFinalForConversation,
+  shouldClearAwaitingReplyForMessage,
+} from '@/lib/awaiting-reply'
 
 export const useXClawStore = create<XClawStore>()(
   subscribeWithSelector((set, get) => ({

@@ -56,8 +56,19 @@ export function unwrapGatewayRpcResult<T>(payload: unknown): T {
     'entry' in r ||
     'error' in r ||
     'status' in r ||
-    'runId' in r
+    'runId' in r ||
+    /** agent.wait / 流式终稿常见：内层仅有 output、message、content，无顶层 status */
+    'output' in r ||
+    'message' in r ||
+    'content' in r
   ) {
+    /** agent.wait 常见仅返回 runId/status/endedAt，正文在 chat.history；unwrap 后只剩元数据时保留外层便于解析与落库 */
+    const rich = ['output', 'message', 'content', 'text', 'choices', 'delta', 'tool', 'entry', 'key', 'error', 'response']
+    const keys = Object.keys(r).map((k) => k.toLowerCase())
+    const hasRich = keys.some((k) => rich.includes(k))
+    if (!hasRich && keys.every((k) => ['runid', 'status', 'endedat', 'ok', 'id', 'startedat'].includes(k))) {
+      return payload as T
+    }
     return inner as T
   }
   return payload as T

@@ -1,5 +1,5 @@
 import { callOpenClawGateway } from '@/lib/openclaw-gateway'
-import { parseGatewayHistoryTranscript } from '@/lib/transcript-parser'
+import { parseGatewayHistoryTranscript, type MessageContentPart } from '@/lib/transcript-parser'
 
 /**
  * 从 Gateway chat.history 取最近一条 assistant 文本（用于 agent.wait 超时后补拉终稿）。
@@ -21,8 +21,11 @@ export async function readLatestAssistantReplyFromHistory(
       if (msg.role !== 'assistant') continue
       const parts = Array.isArray(msg.parts) ? msg.parts : []
       const text = parts
-        .filter((part: { type?: string; text?: string }) => part?.type === 'text' && typeof part?.text === 'string')
-        .map((part: { text?: string }) => String(part.text).trim())
+        .filter(
+          (part: MessageContentPart): part is MessageContentPart & { type: 'text'; text: string } =>
+            part.type === 'text' && typeof part.text === 'string',
+        )
+        .map((part) => part.text.trim())
         .filter(Boolean)
         .join('\n')
         .trim()

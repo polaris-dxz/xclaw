@@ -543,7 +543,7 @@ export function MessageInput({
         {/* 底部提示 */}
         <p className="text-center text-xs text-muted-foreground mt-3">
           {showStopButton
-            ? '进行中：可点右侧方形按钮停止等待（仅结束本界面状态，不保证中断远端任务）'
+            ? '进行中：可点右侧停止按钮停止生成'
             : '内容由AI生成，请仔细甄别'}
         </p>
       </motion.div>
