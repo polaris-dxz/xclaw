@@ -64,7 +64,7 @@ export function sinceQueryParamFromMaxCreatedAt(maxCreatedAt: number): number | 
 
 export async function fetchConversationMessages(
   conversationId: string,
-  opts: { since?: number | null; limit?: number }
+  opts: { since?: number | null; limit?: number; signal?: AbortSignal }
 ): Promise<ChatMessage[]> {
   const limit = Math.min(opts.limit ?? 200, 200)
   const params = new URLSearchParams({
@@ -77,6 +77,7 @@ export async function fetchConversationMessages(
   const res = await fetch(`/api/chat/messages?${params.toString()}`, {
     cache: 'no-store',
     credentials: 'same-origin',
+    ...(opts.signal ? { signal: opts.signal } : {}),
   })
   if (!res.ok) return []
   const data = (await res.json().catch(() => ({}))) as { messages?: ChatMessage[] }
