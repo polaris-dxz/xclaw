@@ -10,6 +10,7 @@ import {
   isGatewaySyntheticUserContext,
   isThinkingProcessMessage,
   groupMessagesForDisplay,
+  isUserChatMessage,
 } from './chat-helpers'
 import type { ChatMessage } from '../../store'
 import { shouldClearAwaitingReplyForMessage } from '../../lib/awaiting-reply'
@@ -100,6 +101,30 @@ function msg(partial: Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'content' 
   } as ChatMessage
 }
 
+describe('gateway infra JSON must not be treated as human user', () => {
+  it('isUserChatMessage is false for sessions dump on user row', () => {
+    const raw = JSON.stringify({
+      count: 1,
+      sessions: [
+        {
+          key: 'agent:main:ui-x',
+          sessionId: '4e51c2ee-5b55-4c2c-b787-de54be194485',
+          messages: [],
+        },
+      ],
+    })
+    const m = msg({
+      id: 99,
+      content: raw,
+      created_at: 1,
+      from_agent: 'user',
+      metadata: { role: 'user', source: 'jsonl-disk-sync' },
+    })
+    expect(isUserChatMessage(m, null)).toBe(false)
+    expect(isThinkingProcessMessage(m, null)).toBe(false)
+  })
+})
+
 describe('isGatewaySyntheticUserContext / gateway user vs real user', () => {
   it('treats tool JSON and SOUL bootstrap as synthetic', () => {
     expect(
@@ -141,6 +166,38 @@ describe('isGatewaySyntheticUserContext / gateway user vs real user', () => {
         }),
       ),
     ).toBe(false)
+  })
+
+  it('does not flag OpenClaw untrusted-sender envelope when user text remains after strip', () => {
+    const raw = `Sender (untrusted metadata):
+{"label":"cli","id":"cli"}
+[Mon 2026-04-13 19:51 GMT+8] 你好`
+    expect(
+      isGatewaySyntheticUserContext(
+        msg({
+          id: 41,
+          content: raw,
+          created_at: 41,
+          metadata: { role: 'user', source: 'jsonl-disk-sync' },
+        }),
+      ),
+    ).toBe(false)
+  })
+
+  it('flags untrusted envelope with no remaining user text as synthetic', () => {
+    const raw = `Sender (untrusted metadata):
+{"label":"cli","id":"cli"}
+[Mon 2026-04-13 19:51 GMT+8]`
+    expect(
+      isGatewaySyntheticUserContext(
+        msg({
+          id: 42,
+          content: `${raw}\n`,
+          created_at: 42,
+          metadata: { role: 'user' },
+        }),
+      ),
+    ).toBe(true)
   })
 
   it('assistant text with phase thinking is not merged into thinking timeline', () => {

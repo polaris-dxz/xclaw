@@ -20,6 +20,7 @@ import {
   isUserChatMessage,
   looksLikeGatewayToolProcessJson,
 } from './chat-helpers'
+import { stripUntrustedSenderMetadataEnvelope } from '@/lib/chat-messages/untrusted-sender-envelope'
 
 function summarizeProcessJson(content: string): { title: string; detail: string } {
   const raw = extractLeadingJsonObject(content)
@@ -69,9 +70,10 @@ function StepTitle({ message }: { message: ChatMessage }) {
     )
   }
 
+  const processBody = stripUntrustedSenderMetadataEnvelope(message.content)
   return (
     <div className="max-w-full">
-      <MarkdownContent tone="muted">{message.content}</MarkdownContent>
+      <MarkdownContent tone="muted">{processBody}</MarkdownContent>
     </div>
   )
 }

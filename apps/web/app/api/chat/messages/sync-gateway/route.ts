@@ -1,9 +1,15 @@
+import {
+  openclawMessageLine,
+  parseOpenclawEventJson,
+  stringifyOpenclawEventLine,
+} from '@/lib/chat-messages/openclaw-event-shape'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, type Message } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
 import { eventBus } from '@/lib/event-bus'
 import { getAllGatewaySessions } from '@/lib/sessions'
 import { readLatestAssistantReplyFromHistory } from '@/lib/openclaw-chat-history'
+import { stripGatewayXmlWrappers } from '@/lib/chat-messages/agent-wait-reply'
 import { logger } from '@/lib/logger'
 
 function safeParseMetadata(raw: string | null | undefined): Record<string, unknown> | null {
@@ -90,7 +96,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ ok: false, reason: 'no_session' }, { status: 200 })
     }
 
-    const text = await readLatestAssistantReplyFromHistory(sessionKey)
+    const rawText = await readLatestAssistantReplyFromHistory(sessionKey)
+    const text = rawText ? stripGatewayXmlWrappers(rawText) : null
     if (!text || !text.trim()) {
       return NextResponse.json({ ok: false, reason: 'no_assistant_in_history' }, { status: 200 })
     }
@@ -106,10 +113,14 @@ export async function POST(request: NextRequest) {
       .get(conversation_id, workspaceId) as { to_agent: string | null } | undefined
     const toAgent = lastFromMain?.to_agent || 'you'
 
+    const assistantEventJson = stringifyOpenclawEventLine(
+      openclawMessageLine('assistant', text, new Date().toISOString()),
+    )
+
     const replyInsert = db
       .prepare(
-        `INSERT INTO messages (conversation_id, from_agent, to_agent, content, message_type, metadata, workspace_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO messages (conversation_id, from_agent, to_agent, content, message_type, metadata, workspace_id, openclaw_event_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         conversation_id,
@@ -124,16 +135,20 @@ export async function POST(request: NextRequest) {
           source: 'sync-gateway',
           sessionKey,
         }),
-        workspaceId
+        workspaceId,
+        assistantEventJson,
       )
 
     const row = db
       .prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?')
       .get(replyInsert.lastInsertRowid, workspaceId) as Message
 
+    const openclaw_event = parseOpenclawEventJson(row.openclaw_event_json)
+    const { openclaw_event_json: _raw, ...rowRest } = row
     eventBus.broadcast('chat.message', {
-      ...row,
+      ...rowRest,
       metadata: safeParseMetadata(row.metadata),
+      ...(openclaw_event ? { openclaw_event } : {}),
     })
 
     return NextResponse.json({ ok: true, inserted: true, messageId: row.id }, { status: 200 })

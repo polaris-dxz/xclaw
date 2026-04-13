@@ -11,149 +11,11 @@ import {
   readSessionJsonl,
   type TranscriptMessage,
 } from '@/lib/transcript-parser'
-
-type InsertableMessage = {
-  conversationId: string
-  from: string
-  to: string | null
-  content: string
-  messageType: 'text' | 'status' | 'tool_call'
-  metadata?: Record<string, unknown>
-  createdAt: number
-}
-
-function toUnixSeconds(value: string | undefined, fallback: number): number {
-  if (!value) return fallback
-  const ms = Date.parse(value)
-  if (!Number.isFinite(ms) || ms <= 0) return fallback
-  return Math.floor(ms / 1000)
-}
-
-function normalizeText(text: string): string {
-  return String(text || '').trim().slice(0, 8000)
-}
-
-/** 解析 messages.metadata；用于判断会话是否含本地上传的附件（勿整段 DELETE，否则会抹掉 dataUrl） */
-function parseMetadataObject(raw: string | null): Record<string, unknown> | null {
-  if (!raw) return null
-  try {
-    const v = JSON.parse(raw) as unknown
-    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
-  } catch {
-    return null
-  }
-}
-
-function conversationHasStoredAttachments(
-  db: ReturnType<typeof getDatabase>,
-  conversationId: string,
-  workspaceId: number,
-): boolean {
-  const rows = db
-    .prepare(
-      `SELECT metadata FROM messages WHERE conversation_id = ? AND workspace_id = ? ORDER BY id DESC LIMIT 120`,
-    )
-    .all(conversationId, workspaceId) as Array<{ metadata: string | null }>
-  for (const row of rows) {
-    const meta = parseMetadataObject(row.metadata)
-    if (!meta) continue
-    const att = meta.attachments
-    if (Array.isArray(att) && att.length > 0) return true
-  }
-  return false
-}
-
-function transcriptToMessages(
-  conversationId: string,
-  sessionAgent: string,
-  sessionKey: string,
-  transcript: TranscriptMessage[],
-  baseTimestampSec: number,
-): InsertableMessage[] {
-  const out: InsertableMessage[] = []
-
-  transcript.forEach((entry, index) => {
-    const timestamp = toUnixSeconds(entry.timestamp, baseTimestampSec + index)
-    const role = entry.role === 'assistant' ? 'assistant' : entry.role === 'system' ? 'system' : 'user'
-    const from = role === 'assistant' ? sessionAgent : role === 'system' ? 'system' : 'user'
-    const to = role === 'assistant' ? 'user' : sessionAgent
-
-    for (const part of entry.parts) {
-      if (part.type === 'text') {
-        const text = normalizeText(part.text)
-        if (!text) continue
-        out.push({
-          conversationId,
-          from,
-          to,
-          content: text,
-          messageType: 'text',
-          metadata: { source: 'gateway-history', sessionKey, role },
-          createdAt: timestamp,
-        })
-        continue
-      }
-
-      if (part.type === 'thinking') {
-        const thinking = normalizeText(part.thinking)
-        if (!thinking) continue
-        out.push({
-          conversationId,
-          from: sessionAgent,
-          to: 'user',
-          content: thinking,
-          messageType: 'status',
-          metadata: { source: 'gateway-history', sessionKey, event: 'thinking' },
-          createdAt: timestamp,
-        })
-        continue
-      }
-
-      if (part.type === 'tool_use') {
-        out.push({
-          conversationId,
-          from: sessionAgent,
-          to: 'user',
-          content: part.name || 'tool_use',
-          messageType: 'tool_call',
-          metadata: {
-            source: 'gateway-history',
-            sessionKey,
-            event: 'tool_call',
-            toolName: part.name || 'tool_use',
-            input: part.input || '',
-            status: 'running',
-            toolUseId: part.id || '',
-          },
-          createdAt: timestamp,
-        })
-        continue
-      }
-
-      if (part.type === 'tool_result') {
-        out.push({
-          conversationId,
-          from: sessionAgent,
-          to: 'user',
-          content: `tool_result:${part.toolUseId || 'unknown'}`,
-          messageType: 'tool_call',
-          metadata: {
-            source: 'gateway-history',
-            sessionKey,
-            event: 'tool_call',
-            toolName: 'tool_result',
-            output: part.content || '',
-            status: part.isError ? 'error' : 'ok',
-            toolUseId: part.toolUseId || '',
-          },
-          createdAt: timestamp,
-        })
-      }
-    }
-  })
-
-  return out
-}
+import {
+  conversationHasStoredAttachments,
+  transcriptToGatewaySqliteRows,
+  type GatewaySqliteInsertableMessage,
+} from '@/lib/chat-messages/gateway-jsonl-sqlite-sync'
 
 async function readTranscript(sessionKey: string, sessionAgent: string, sessionId: string, limit: number) {
   try {
@@ -196,8 +58,8 @@ export async function POST(request: NextRequest) {
 
     const deleteStmt = db.prepare('DELETE FROM messages WHERE conversation_id = ? AND workspace_id = ?')
     const insertStmt = db.prepare(`
-      INSERT INTO messages (conversation_id, from_agent, to_agent, content, message_type, metadata, workspace_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO messages (conversation_id, from_agent, to_agent, content, message_type, metadata, workspace_id, openclaw_event_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
 
     let importedConversations = 0
@@ -214,7 +76,14 @@ export async function POST(request: NextRequest) {
         continue
       }
       const baseTsSec = Math.max(1, Math.floor((session.updatedAt || Date.now()) / 1000) - transcript.length)
-      const mapped = transcriptToMessages(conversationId, session.agent, session.key, transcript, baseTsSec)
+      const mapped: GatewaySqliteInsertableMessage[] = transcriptToGatewaySqliteRows(
+        conversationId,
+        session.agent,
+        session.key,
+        transcript,
+        baseTsSec,
+        'gateway-history',
+      )
       if (mapped.length === 0) continue
 
       deleteStmt.run(conversationId, workspaceId)
@@ -227,6 +96,7 @@ export async function POST(request: NextRequest) {
           item.messageType,
           item.metadata ? JSON.stringify(item.metadata) : null,
           workspaceId,
+          item.openclawEventJson,
           item.createdAt,
         )
       }

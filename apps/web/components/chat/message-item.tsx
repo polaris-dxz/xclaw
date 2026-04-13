@@ -34,14 +34,21 @@ import {
   isUserChatMessage,
   looksLikeGatewayToolProcessJson,
   stripInlinedAttachmentPreviewFromUserContent,
+  stripAssistantXmlFinalWrapper,
   stripOpenClawAssistantFooter,
 } from './chat-helpers'
+import { stripUntrustedSenderMetadataEnvelope } from '@/lib/chat-messages/untrusted-sender-envelope'
+import { formatOpenclawGatewayInfraForDisplay } from '@/lib/chat-messages/openclaw-infra-tool-json'
 import { toast } from '@/hooks/use-toast'
 import type { JsonValue } from '@/store'
 
 /** 与 MarkdownContent 配套：抵消 typography 对 hr 等的负 margin，保证与正文左缘对齐 */
 const proseChat =
   'prose prose-sm dark:prose-invert max-w-none w-full min-w-0 [&_hr]:mx-0 [&_hr]:w-full [&_blockquote]:mx-0'
+
+/** 用户短消息：去掉 prose 段落默认上下边距，避免气泡显得「上下很空」 */
+const proseUserBubble =
+  'prose prose-sm dark:prose-invert max-w-none w-full min-w-0 [&_hr]:mx-0 [&_hr]:w-full [&_blockquote]:mx-0 [&_.markdown-body>p]:my-0'
 
 interface MessageItemProps {
   message: ChatMessage
@@ -63,21 +70,35 @@ export function MessageItem({ message, conversationId: _conversationId }: Messag
   const role = String(metadata.role || '').toLowerCase()
   const isThinkingStatus =
     message.message_type === 'status' && (status === 'accepted' || status === 'processing') && (phase === 'thinking' || !phase)
+  const isGatewayRawDump = Boolean(metadata.gatewayRawResponse)
   /** Gateway 常为 text + role=assistant，phase 可能为空或误标为 thinking */
   const isFinalText =
     message.message_type === 'text' &&
     !isToolCall &&
-    !looksLikeGatewayToolProcessJson(message.content) &&
+    (isGatewayRawDump || !looksLikeGatewayToolProcessJson(message.content)) &&
     (role === 'assistant' || phase === 'final' || phase === '')
   const isErrorBubble = phase === 'error' && message.message_type === 'status'
   const isFinalStatus = phase === 'final' && message.message_type === 'status'
   const rawContent = String(message.content ?? '')
+  /** 网关工具大块 JSON：改为一行说明，避免 Markdown 渲出整段 */
+  const infraSummaryLine =
+    message.message_type === 'text' ? formatOpenclawGatewayInfraForDisplay(rawContent) : null
+  /** OpenClaw CLI/jsonl 包装：不论判成用户还是助手气泡，text 类型统一先剥壳（避免误分类时整段 JSON 仍走 Markdown） */
+  const textBaseForDisplay =
+    message.message_type === 'text'
+      ? (infraSummaryLine ?? stripUntrustedSenderMetadataEnvelope(rawContent))
+      : rawContent
   /** 用户气泡：不展示服务端内联的附件全文，仅展示输入文字 + 下方附件区 */
-  const userDisplayContent = isUser ? stripInlinedAttachmentPreviewFromUserContent(rawContent) : rawContent
-  /** 剥离 OpenClaw 末尾会话元信息块，避免占满主气泡 */
-  const assistantDisplay = isUser ? userDisplayContent : stripOpenClawAssistantFooter(rawContent)
+  const userDisplayContent = isUser
+    ? stripInlinedAttachmentPreviewFromUserContent(textBaseForDisplay)
+    : textBaseForDisplay
+  /** 剥离 final 阶段 XML 包装与 OpenClaw 末尾会话元信息块 */
+  const assistantDisplay = isUser
+    ? userDisplayContent
+    : stripOpenClawAssistantFooter(stripAssistantXmlFinalWrapper(textBaseForDisplay))
   const showFeedback = Boolean(
     !isUser &&
+      !isGatewayRawDump &&
       isFinalText &&
       assistantDisplay.trim().length > 0 &&
       (role === 'assistant' || phase === 'final' || phase === ''),
@@ -134,14 +155,14 @@ export function MessageItem({ message, conversationId: _conversationId }: Messag
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
       transition={{ duration: 0.3, ease: 'easeOut' }}
-      className="py-4"
+      className={cn(isUser ? 'py-0' : 'py-4')}
     >
       {isUser ? (
         /* 用户消息：右侧气泡 + 用户头像，模拟对话 */
         <div className="flex w-full items-end justify-end gap-2">
-          <div className="max-w-[min(80%,28rem)] rounded-2xl bg-secondary/80 px-4 py-3">
+          <div className="max-w-[min(80%,28rem)] rounded-2xl bg-secondary/80 px-4 py-2">
             {userDisplayContent.trim().length > 0 ? (
-              <div className={proseChat}>
+              <div className={proseUserBubble}>
                 <MarkdownContent>{userDisplayContent}</MarkdownContent>
               </div>
             ) : null}
@@ -282,12 +303,20 @@ export function MessageItem({ message, conversationId: _conversationId }: Messag
             <div className="space-y-1">
               <div
                 className={cn(
-                  proseChat,
+                  !isGatewayRawDump && proseChat,
                   message.pendingStatus === 'sending' && 'typing-cursor',
                   !hasAssistantThinkingUi && 'pt-[calc((2.25rem-1lh)/2)]'
                 )}
               >
-                {assistantDisplay.trim() ? <MarkdownContent>{assistantDisplay}</MarkdownContent> : null}
+                {assistantDisplay.trim() ? (
+                  isGatewayRawDump ? (
+                    <pre className="max-h-[min(70vh,32rem)] overflow-auto whitespace-pre-wrap wrap-break-word rounded-md border border-border/60 bg-muted/30 p-3 font-mono text-xs leading-relaxed text-foreground/90">
+                      {assistantDisplay}
+                    </pre>
+                  ) : (
+                    <MarkdownContent>{assistantDisplay}</MarkdownContent>
+                  )
+                ) : null}
               </div>
             </div>
           ) : (

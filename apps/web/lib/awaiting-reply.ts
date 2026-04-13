@@ -2,6 +2,38 @@ import type { ChatMessage, CurrentUser } from '@/store'
 import { isGatewaySyntheticUserContext, isUserChatMessage } from '../components/chat/chat-helpers'
 
 /**
+ * 会话内是否已有「可视为已落地的助手终稿」——用于全量拉取/轮询时决定是否过滤库里 accepted+thinking 占位。
+ *
+ * 不可把 `shouldClearAwaitingReplyForMessage` 与 `awaitingRunId: null` 混用：`runMatches` 在 awaitingRun 为空时恒为真，
+ * 会把缺少 phase/role 的任意 text 误判为终稿，从而滤掉唯一的 thinking 状态行，界面像「什么都没渲染」。
+ */
+export function hasPersistedAssistantFinalForConversation(
+  messages: ChatMessage[],
+  conversationId: string,
+  currentUser: CurrentUser | null,
+): boolean {
+  for (const m of messages) {
+    if (m.conversation_id !== conversationId) continue
+    if (isUserChatMessage(m, currentUser)) continue
+    if (isGatewaySyntheticUserContext(m)) continue
+
+    const meta = (m.metadata || {}) as Record<string, unknown>
+    const phase = String(meta.phase || '').toLowerCase()
+    const role = String(meta.role || '').toLowerCase()
+
+    if (m.message_type === 'text') {
+      if (phase === 'final' || phase === 'error' || role === 'assistant') {
+        if (String(m.content || '').trim().length > 0) return true
+      }
+    }
+    if (m.message_type === 'status' && (phase === 'final' || phase === 'error')) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
  * 判断一条消息是否应结束「等待助手回复」。
  * Gateway / SSE 有时不带 phase、或同一 id 重复推送，需与 chat-panel POST 预判共用一套规则。
  */
@@ -49,9 +81,7 @@ export function shouldClearAwaitingReplyForMessage(
    */
   if (message.message_type === 'text') {
     const role = String(metadata.role || '').toLowerCase()
-    console.log('[shouldClear] text message, role:', role, 'phase:', phase, 'status:', status)
     if (role === 'assistant') {
-      console.log('[shouldClear] Returning TRUE: role=assistant')
       return true
     }
     /**
@@ -59,7 +89,6 @@ export function shouldClearAwaitingReplyForMessage(
      * 轮询永远清不掉 awaiting，只能等 SSE 用「更干净」的 metadata 覆盖。
      */
     if (phase === 'final' || phase === 'error') {
-      console.log('[shouldClear] Returning TRUE: phase final/error')
       return true
     }
     /**
@@ -68,18 +97,14 @@ export function shouldClearAwaitingReplyForMessage(
      * 对「已排除真人/网关注入」的 text：非 user、非 thinking、且非流式状态时视为可结束等待。
      */
     if (role !== 'user' && phase !== 'thinking') {
-      console.log('[shouldClear] text: role!=user && phase!=thinking')
       if (status === 'accepted' || status === 'processing') {
-        console.log('[shouldClear] Returning FALSE: status accepted/processing')
         return false
       }
-      console.log('[shouldClear] Returning TRUE: not accepted/processing')
       return true
     }
   }
 
   const runMatches = !awaitingRun || !msgRunId || msgRunId === awaitingRun
-  console.log('[shouldClear] runMatches:', runMatches, { awaitingRun, msgRunId })
   if (!runMatches) return false
 
   if (message.message_type === 'tool_call' || metadata.event === 'tool_call') return false
@@ -91,7 +116,6 @@ export function shouldClearAwaitingReplyForMessage(
     (phase === 'thinking' || !phase) &&
     (status === 'accepted' || status === 'processing')
   ) {
-    console.log('[shouldClear] status message with accepted/processing, returning FALSE')
     return false
   }
 
@@ -112,6 +136,5 @@ export function shouldClearAwaitingReplyForMessage(
     if (['error', 'delivery_failed', 'unknown', 'offline'].includes(status)) return true
   }
 
-  console.log('[shouldClear] Default returning FALSE for:', { message_type: message.message_type, phase, status, role: metadata.role })
   return false
 }

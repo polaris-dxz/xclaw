@@ -4,7 +4,6 @@ import { useRef, useEffect, useCallback, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { MessageItem } from './message-item'
 import { MessageInput, type ChatTokenUsageLine } from './message-input'
-import { ThinkingProcessTimeline } from './thinking-process-timeline'
 import {
   useXClawStore,
   type ChatAttachment,
@@ -13,6 +12,7 @@ import {
   type CurrentUser,
   shouldClearAwaitingReplyForMessage,
 } from '@/store'
+import { hasPersistedAssistantFinalForConversation } from '@/lib/awaiting-reply'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { groupMessagesForDisplay, resolveOutgoingRecipient } from './chat-helpers'
 import {
@@ -26,6 +26,8 @@ import {
 import { isPendingConversation } from '@/lib/pending-conversation'
 import { setConversationTitleOverride } from '@/lib/conversation-title-overrides'
 import { buildFirstMessageSessionLabel } from '@/lib/session-label'
+import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Bot, Loader2 } from 'lucide-react'
 import { toast } from '@/hooks/use-toast'
 
 const POLL_INTERVAL_MS = 3000
@@ -34,9 +36,9 @@ const FULL_FETCH_FALLBACK_MS = 12000
 /** agent.wait 超时后从 Gateway 拉终稿，节流避免打爆 Gateway */
 const GATEWAY_PULL_MIN_INTERVAL_MS = 6000
 /** 发送成功后一段时间内仍增量拉取，覆盖 SSE 未送达、agent.wait 超时后晚落库 */
-const POST_SEND_POLL_WINDOW_MS = 90_000
-/** 最大等待时间，超过后自动清除等待状态 */
-const MAX_AWAIT_TIMEOUT_MS = 60_000
+const POST_SEND_POLL_WINDOW_MS = 180_000
+/** 最大等待时间，超过后自动清除等待状态（需 >= 服务端 agent.wait 120s + CLI extra 20s + 余量） */
+const MAX_AWAIT_TIMEOUT_MS = 150_000
 
 function dedupeMessagesById(messages: ChatMessage[]): ChatMessage[] {
   const bucket = new Map<string, ChatMessage>()
@@ -51,18 +53,25 @@ function hasAssistantTerminalForRun(
   messages: ChatMessage[],
   conversationId: string,
   runId: string | null,
-  currentUser: CurrentUser | null
+  currentUser: CurrentUser | null,
 ): boolean {
-  const fakeState = {
-    isAwaitingReply: true,
-    awaitingConversationId: conversationId,
-    awaitingRunId: runId,
-    currentUser,
+  if (runId) {
+    return messages.some((m) =>
+      shouldClearAwaitingReplyForMessage(
+        {
+          isAwaitingReply: true,
+          awaitingConversationId: conversationId,
+          awaitingRunId: runId,
+          currentUser,
+        },
+        m,
+      ),
+    )
   }
-  return messages.some((m) => shouldClearAwaitingReplyForMessage(fakeState, m))
+  return hasPersistedAssistantFinalForConversation(messages, conversationId, currentUser)
 }
 
-/** 过滤掉过时的 status 消息（accepted/processing 且 phase=thinking），这些在收到终稿后不应显示 */
+/** 过滤掉不应显示的 status 消息 */
 function filterObsoleteStatusMessages(messages: ChatMessage[], conversationId: string): ChatMessage[] {
   return messages.filter((m) => {
     if (m.conversation_id !== conversationId) return true
@@ -71,11 +80,10 @@ function filterObsoleteStatusMessages(messages: ChatMessage[], conversationId: s
     if (!meta) return true
     const status = String(meta.status || '').toLowerCase()
     const phase = String(meta.phase || '').toLowerCase()
-    // 保留：final/error 状态的 status，或者非 accepted/processing 的 status
-    if (phase === 'final' || phase === 'error') return true
+    // phase=final 的 status 消息是兜底提示（如"已完成处理"），不向用户展示
+    if (phase === 'final') return false
+    if (phase === 'error') return true
     if (status !== 'accepted' && status !== 'processing') return true
-    // 过滤掉过时的 accepted/processing 消息
-    console.log('[filterObsoleteStatusMessages] Filtering out:', { id: m.id, status, phase })
     return false
   })
 }
@@ -86,19 +94,11 @@ function clearAwaitingIfNeeded(conversationId: string, merged: ChatMessage[], re
 
   // 超时自动清除等待状态（防御性措施）
   if (requestedAt && Date.now() - requestedAt > MAX_AWAIT_TIMEOUT_MS) {
-    console.log('[clearAwaiting] Timeout reached, clearing waiting state')
     snap.setAwaitingReply({ waiting: false })
     return
   }
 
   const conv = merged.filter((m) => m.conversation_id === conversationId)
-  console.log('[clearAwaiting] Checking messages:', {
-    conversationId,
-    awaitingConversationId: snap.awaitingConversationId,
-    awaitingRunId: snap.awaitingRunId,
-    messageCount: conv.length,
-    messages: conv.map(m => ({ id: m.id, type: m.message_type, from: m.from_agent, meta: m.metadata })),
-  })
 
   if (
     conv.some((m) =>
@@ -113,10 +113,7 @@ function clearAwaitingIfNeeded(conversationId: string, merged: ChatMessage[], re
       )
     )
   ) {
-    console.log('[clearAwaiting] Clearing waiting state')
     snap.setAwaitingReply({ waiting: false })
-  } else {
-    console.log('[clearAwaiting] NOT clearing - no terminal message found')
   }
 }
 
@@ -143,15 +140,19 @@ export function ChatPanel() {
     removePendingMessage,
     setIsSendingMessage,
     setAwaitingReply,
-    awaitingConversationId,
     currentUser,
     updateConversation,
     setConversations,
     setActiveConversation,
   } = useXClawStore()
 
+  const isAwaitingReply = useXClawStore((s) => s.isAwaitingReply)
+  const awaitingConversationId = useXClawStore((s) => s.awaitingConversationId)
+
   const [tokenUsage, setTokenUsage] = useState<ChatTokenUsageLine | null>(null)
   const [tokenUsageLoading, setTokenUsageLoading] = useState(false)
+  /** POST /api/chat/messages 往返期间为当前会话 id，与 isAwaitingReply 衔接，避免「等 runId 才出 loading」的空窗 */
+  const [postForwardLoadingConversationId, setPostForwardLoadingConversationId] = useState<string | null>(null)
 
   const fetchTokenUsage = useCallback(async () => {
     const id = useXClawStore.getState().activeConversation
@@ -193,11 +194,13 @@ export function ChatPanel() {
   const selectedConversation = conversations.find((c) => c.id === activeConversation)
   const selectedMessages = dedupeMessagesById(chatMessages.filter((msg) => msg.conversation_id === activeConversation))
   const displayGroups = groupMessagesForDisplay(selectedMessages, currentUser)
+  const showGatewayAwaitingLoader =
+    Boolean(activeConversation) &&
+    (postForwardLoadingConversationId === activeConversation ||
+      (isAwaitingReply && awaitingConversationId === activeConversation))
 
   const runIncrementalSync = useCallback(async (conversationId: string) => {
     if (isPendingConversation(conversationId)) return
-
-    console.log('[runIncrementalSync] Starting sync for:', conversationId)
 
     const pre = useXClawStore.getState()
     const awaitingPre =
@@ -206,8 +209,6 @@ export function ChatPanel() {
       pre.activeConversation === conversationId
     const inPostWindowPre =
       postPollUntilRef.current > Date.now() && postPollConversationRef.current === conversationId
-
-    console.log('[runIncrementalSync] pre-check:', { awaitingPre, inPostWindowPre, isAwaitingReply: pre.isAwaitingReply })
 
     if (
       (awaitingPre || inPostWindowPre) &&
@@ -229,14 +230,11 @@ export function ChatPanel() {
     const { chatMessages: all, setChatMessages } = useXClawStore.getState()
     const max = maxCreatedAtForConversation(all, conversationId)
     const since = sinceQueryParamFromMaxCreatedAt(max)
-    console.log('[runIncrementalSync] Fetching with since:', since, 'max:', max)
 
     let incoming = await fetchConversationMessages(conversationId, {
       since: since ?? undefined,
       limit: 200,
     })
-
-    console.log('[runIncrementalSync] Got incoming messages:', incoming.length)
 
     const snap = useXClawStore.getState()
     const awaiting =
@@ -247,16 +245,13 @@ export function ChatPanel() {
     /** 本地 max 因 SSE 时间戳偏大时，增量可能一直为空；定期全量一页兜底 */
     if (incoming.length === 0 && awaiting) {
       const now = Date.now()
-      console.log('[runIncrementalSync] No incoming, checking fallback:', { now, lastFullFetchAtRef: lastFullFetchAtRef.current, FULL_FETCH_FALLBACK_MS })
       if (now - lastFullFetchAtRef.current >= FULL_FETCH_FALLBACK_MS) {
         lastFullFetchAtRef.current = now
         incoming = await fetchConversationMessages(conversationId, { limit: 200 })
-        console.log('[runIncrementalSync] Fallback fetch got:', incoming.length)
       }
     }
 
     if (incoming.length === 0) {
-      console.log('[runIncrementalSync] No messages, calling clearAwaitingIfNeeded')
       clearAwaitingIfNeeded(conversationId, all, awaitingRequestedAtRef.current ?? undefined)
       return
     }
@@ -268,7 +263,6 @@ export function ChatPanel() {
     const filtered = hasTerminal ? filterObsoleteStatusMessages(merged, conversationId) : merged
 
     setChatMessages(filtered)
-    console.log('[runIncrementalSync] Merged messages, calling clearAwaitingIfNeeded, hasTerminal:', hasTerminal)
     clearAwaitingIfNeeded(conversationId, filtered, awaitingRequestedAtRef.current ?? undefined)
   }, [])
 
@@ -277,7 +271,13 @@ export function ChatPanel() {
     if (scrollViewportRef.current) {
       scrollViewportRef.current.scrollTop = scrollViewportRef.current.scrollHeight
     }
-  }, [selectedMessages.length, activeConversation])
+  }, [
+    selectedMessages.length,
+    activeConversation,
+    isAwaitingReply,
+    awaitingConversationId,
+    postForwardLoadingConversationId,
+  ])
 
   // 切换会话：全量拉取（避免仅靠增量无基准）
   useEffect(() => {
@@ -532,6 +532,7 @@ export function ChatPanel() {
     addChatMessage(pendingMessage)
     setIsSendingMessage(true)
     setAwaitingReply({ waiting: false })
+    setPostForwardLoadingConversationId(convId)
     try {
       const response = await fetch('/api/chat/messages', {
         method: 'POST',
@@ -548,7 +549,8 @@ export function ChatPanel() {
       })
       const data = (await response.json()) as {
         message?: ChatMessage
-        forward?: { attempted?: boolean; delivered?: boolean; runId?: string }
+        forward?: { attempted?: boolean; delivered?: boolean; runId?: string; reason?: string }
+        jsonl_resync?: boolean
       }
       if (!response.ok) {
         updatePendingMessage(tempId, { pendingStatus: 'failed' })
@@ -560,7 +562,25 @@ export function ChatPanel() {
       } else {
         removePendingMessage(tempId)
       }
+      if (data?.jsonl_resync) {
+        try {
+          const full = await fetchConversationMessages(convId, { limit: 200 })
+          const { chatMessages: all, setChatMessages } = useXClawStore.getState()
+          const others = all.filter((m) => m.conversation_id !== convId)
+          setChatMessages(normalizeChatMessagesForStore([...others, ...full]))
+        } catch {
+          // 仍依赖下方增量同步
+        }
+      }
       const delivered = Boolean(data?.forward?.attempted) && Boolean(data?.forward?.delivered)
+      if (Boolean(data?.forward?.attempted) && !delivered) {
+        const r = typeof data.forward?.reason === 'string' ? data.forward.reason.trim() : ''
+        toast({
+          title: '网关未接受投递',
+          description: r || '请检查网关连接与配置。',
+          variant: 'destructive',
+        })
+      }
       const runId = typeof data?.forward?.runId === 'string' ? data.forward.runId : null
       const userMsg = data?.message as ChatMessage | undefined
       const userTs = typeof userMsg?.created_at === 'number' ? userMsg.created_at : null
@@ -585,6 +605,7 @@ export function ChatPanel() {
       updatePendingMessage(tempId, { pendingStatus: 'failed' })
       setAwaitingReply({ waiting: false })
     } finally {
+      setPostForwardLoadingConversationId(null)
       setIsSendingMessage(false)
     }
     } finally {
@@ -596,6 +617,7 @@ export function ChatPanel() {
     if (awaitingConversationId && activeConversation && awaitingConversationId !== activeConversation) return
     setIsSendingMessage(false)
     setAwaitingReply({ waiting: false })
+    setPostForwardLoadingConversationId(null)
   }
 
   if (!selectedConversation) {
@@ -617,9 +639,9 @@ export function ChatPanel() {
     <div className="flex-1 min-h-0 flex flex-col h-full overflow-hidden">
       {/* 消息列表 */}
       <ScrollArea className="flex-1 min-h-0 h-full px-6" viewportRef={scrollViewportRef}>
-        <div className="max-w-4xl mx-auto py-6">
-          <AnimatePresence mode="popLayout">
-            {displayGroups.map((group, idx) => {
+        <div className="max-w-4xl mx-auto py-3">
+          <AnimatePresence mode="sync">
+            {displayGroups.map((group) => {
               if (group.type === 'user') {
                 const message = group.messages[0]
                 return (
@@ -630,15 +652,9 @@ export function ChatPanel() {
                   />
                 )
               }
+              /** 过程类消息（工具 JSON、网关合成 user 等）不单独展示「思考过程」时间线，避免干扰阅读 */
               if (group.type === 'thinking_group') {
-                const first = group.messages[0]
-                const last = group.messages[group.messages.length - 1]
-                return (
-                  <ThinkingProcessTimeline
-                    key={`think-${first.id}-${last.id}-${idx}`}
-                    messages={group.messages}
-                  />
-                )
+                return null
               }
               const message = group.messages[0]
               return (
@@ -649,6 +665,26 @@ export function ChatPanel() {
                 />
               )
             })}
+            {showGatewayAwaitingLoader ? (
+              <motion.div
+                key="awaiting-assistant-placeholder"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.2 }}
+                className="flex w-full items-start gap-2 py-4"
+              >
+                <Avatar className="h-9 w-9 shrink-0 border border-border/60">
+                  <AvatarFallback className="bg-muted">
+                    <Bot className="h-4 w-4 text-muted-foreground" />
+                  </AvatarFallback>
+                </Avatar>
+                <div className="flex items-center gap-2 rounded-2xl border border-border/50 bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden />
+                  <span>正在生成回复…</span>
+                </div>
+              </motion.div>
+            ) : null}
           </AnimatePresence>
         </div>
       </ScrollArea>

@@ -1460,6 +1460,20 @@ const migrations: Migration[] = [
       db.exec(`CREATE INDEX IF NOT EXISTS idx_hidden_conversations_conversation ON hidden_conversations(conversation_id)`)
       db.exec(`CREATE INDEX IF NOT EXISTS idx_hidden_conversations_hidden_at ON hidden_conversations(hidden_at)`)
     }
+  },
+  {
+    id: '046_messages_openclaw_event_json',
+    up(db: Database.Database) {
+      const hasMessages = db
+        .prepare(`SELECT 1 as ok FROM sqlite_master WHERE type = 'table' AND name = 'messages'`)
+        .get() as { ok?: number } | undefined
+      if (!hasMessages?.ok) return
+
+      const cols = db.prepare(`PRAGMA table_info(messages)`).all() as Array<{ name: string }>
+      if (!cols.some((c) => c.name === 'openclaw_event_json')) {
+        db.exec(`ALTER TABLE messages ADD COLUMN openclaw_event_json TEXT`)
+      }
+    }
   }
 ]
 

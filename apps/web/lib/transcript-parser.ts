@@ -11,6 +11,8 @@ export interface TranscriptMessage {
   role: 'user' | 'assistant' | 'system'
   parts: MessageContentPart[]
   timestamp?: string
+  /** 从磁盘 jsonl 解析时的原始行（一行可展开为多行 UI/DB 记录时仍指向同一协议事件） */
+  rawJsonlLine?: string
 }
 
 const SILENT_REPLY_PATTERN = /^\s*NO_REPLY\s*$/i
@@ -64,12 +66,39 @@ function parseTranscriptParts(content: unknown): MessageContentPart[] {
   return parts
 }
 
+/** Gateway chat.history 常见：顶层 `{ role, parts:[{type,text}] }` 而无 `content` 字段 */
+function partsFromGatewayPartsArray(rawParts: unknown[]): MessageContentPart[] {
+  const parts: MessageContentPart[] = []
+  for (const part of rawParts) {
+    if (!part || typeof part !== 'object') continue
+    const p = part as Record<string, unknown>
+    const t = String(p.type || '').toLowerCase()
+    if ((t === 'text' || t === 'output_text' || t === 'input_text') && typeof p.text === 'string' && p.text.trim()) {
+      if (!isSilentReplyText(p.text)) {
+        parts.push({ type: 'text', text: p.text.trim().slice(0, 8000) })
+      }
+    } else if (t === 'thinking' && typeof p.thinking === 'string' && p.thinking.trim()) {
+      parts.push({ type: 'thinking', thinking: p.thinking.trim().slice(0, 4000) })
+    }
+  }
+  return parts
+}
+
 function normalizeTranscriptMessage(msg: any, timestamp?: string): TranscriptMessage | null {
   const role = msg?.role === 'assistant' ? 'assistant' as const
     : msg?.role === 'system' ? 'system' as const
     : 'user' as const
 
-  const parts = parseTranscriptParts(msg?.content ?? msg?.text)
+  const base = msg?.message && typeof msg.message === 'object' ? msg.message : msg
+
+  let parts = parseTranscriptParts(base?.content ?? base?.text ?? msg?.content ?? msg?.text)
+  if (parts.length === 0 && Array.isArray(base?.parts)) {
+    parts = partsFromGatewayPartsArray(base.parts)
+  }
+  if (parts.length === 0 && Array.isArray(msg?.parts)) {
+    parts = partsFromGatewayPartsArray(msg.parts)
+  }
+
   if (parts.length === 0) return null
   return { role, parts, timestamp }
 }
@@ -100,6 +129,7 @@ export function parseJsonlTranscript(raw: string, limit: number): TranscriptMess
       : undefined
     const normalized = normalizeTranscriptMessage(msg, ts)
     if (normalized) {
+      normalized.rawJsonlLine = line
       out.push(normalized)
     }
   }
