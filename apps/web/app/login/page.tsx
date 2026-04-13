@@ -70,7 +70,7 @@ export default function LoginPage() {
             <LogIn className="h-5 w-5 text-primary" />
             登录 xclaw
           </CardTitle>
-          <CardDescription>使用管理员账号进入控制台</CardDescription>
+          <CardDescription></CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {error && (

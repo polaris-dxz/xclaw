@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  dropDuplicateOptimisticUserRows,
   maxCreatedAtForConversation,
   mergeConversationIntoMessages,
   sinceQueryParamFromMaxCreatedAt,
@@ -40,5 +41,78 @@ describe('chat-sync', () => {
     const out = mergeConversationIntoMessages(all, 'c1', incoming)
     expect(out).toHaveLength(3)
     expect(out.find((x) => x.id === 3)?.content).toBe('new')
+  })
+
+  it('dropDuplicateOptimisticUserRows removes negative id when positive duplicate exists', () => {
+    const t = 1700000000
+    const conv = [
+      m({
+        id: -123,
+        conversation_id: 'c1',
+        created_at: t,
+        from_agent: 'you',
+        content: 'hello  world',
+      }),
+      m({
+        id: 42,
+        conversation_id: 'c1',
+        created_at: t + 1,
+        from_agent: 'you',
+        content: 'hello world',
+      }),
+    ]
+    const out = dropDuplicateOptimisticUserRows(conv)
+    expect(out).toHaveLength(1)
+    expect(out[0].id).toBe(42)
+  })
+
+  it('mergeConversationIntoMessages drops optimistic duplicate after merge', () => {
+    const t = 1700000100
+    const all = [
+      m({
+        id: -999,
+        conversation_id: 'c1',
+        created_at: t,
+        from_agent: 'you',
+        content: 'same',
+      }),
+    ]
+    const incoming = [
+      m({
+        id: 7,
+        conversation_id: 'c1',
+        created_at: t,
+        from_agent: 'you',
+        content: 'same',
+      }),
+    ]
+    const out = mergeConversationIntoMessages(all, 'c1', incoming)
+    const c1 = out.filter((x) => x.conversation_id === 'c1')
+    expect(c1).toHaveLength(1)
+    expect(c1[0].id).toBe(7)
+  })
+
+  it('dropDuplicateOptimisticUserRows matches you optimistic to DB username + senderType', () => {
+    const t = 1700000200
+    const conv = [
+      m({
+        id: -1,
+        conversation_id: 'c1',
+        created_at: t,
+        from_agent: 'you',
+        content: '你好',
+      }),
+      m({
+        id: 100,
+        conversation_id: 'c1',
+        created_at: t,
+        from_agent: 'alice',
+        content: '你好',
+        metadata: { senderType: 'user' } as any,
+      }),
+    ]
+    const out = dropDuplicateOptimisticUserRows(conv, null)
+    expect(out).toHaveLength(1)
+    expect(out[0].id).toBe(100)
   })
 })

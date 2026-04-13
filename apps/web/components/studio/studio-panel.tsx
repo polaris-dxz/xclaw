@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button'
 
 export function StudioPanel() {
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const mountedRef = useRef(true)
   const [studioUrl, setStudioUrl] = useState<string>('')
   const [status, setStatus] = useState<'checking' | 'online' | 'offline'>('checking')
   const activeConversation = useXClawStore((s) => s.activeConversation)
@@ -34,49 +35,54 @@ export function StudioPanel() {
     }
   }, [studioUrl, activeConversation])
 
-  useEffect(() => {
-    let cancelled = false
-
-    const resolveBaseUrl = async () => {
-      const electronApi = (window as Window & { electronAPI?: { getStudioBaseUrl?: () => Promise<string> } }).electronAPI
-      if (electronApi?.getStudioBaseUrl) {
-        try {
-          return await electronApi.getStudioBaseUrl()
-        } catch {
-          return buildStudioBaseUrl(process.env.NEXT_PUBLIC_STUDIO_PORT)
-        }
-      }
-      return buildStudioBaseUrl(process.env.NEXT_PUBLIC_STUDIO_PORT)
-    }
-
-    const checkHealth = async () => {
-      const baseUrl = await resolveBaseUrl()
-      if (cancelled) {
-        return
-      }
-      setStudioUrl(baseUrl)
-      setStatus('checking')
+  const runHealthCheck = useCallback(async () => {
+    const electronApi = (window as Window & { electronAPI?: { getStudioBaseUrl?: () => Promise<string> } }).electronAPI
+    let baseUrl: string
+    if (electronApi?.getStudioBaseUrl) {
       try {
-        await fetch(buildStudioHealthUrl(baseUrl), {
-          cache: 'no-store',
-          mode: 'no-cors',
-        })
-        if (!cancelled) {
-          setStatus('online')
-        }
+        baseUrl = await electronApi.getStudioBaseUrl()
       } catch {
-        if (!cancelled) {
-          setStatus('offline')
-        }
+        baseUrl = buildStudioBaseUrl(process.env.NEXT_PUBLIC_STUDIO_PORT)
       }
+    } else {
+      baseUrl = buildStudioBaseUrl(process.env.NEXT_PUBLIC_STUDIO_PORT)
     }
 
-    void checkHealth()
+    if (!mountedRef.current) return
+    setStudioUrl(baseUrl)
+    setStatus('checking')
 
-    return () => {
-      cancelled = true
+    const healthUrl = buildStudioHealthUrl(baseUrl)
+    try {
+      const res = await fetch(healthUrl, {
+        cache: 'no-store',
+        method: 'GET',
+      })
+      const ok = res.ok
+      let bodyOk = ok
+      if (ok) {
+        try {
+          const data = (await res.json()) as { status?: string }
+          bodyOk = data?.status === 'ok'
+        } catch {
+          bodyOk = false
+        }
+      }
+      if (!mountedRef.current) return
+      setStatus(bodyOk ? 'online' : 'offline')
+    } catch {
+      if (!mountedRef.current) return
+      setStatus('offline')
     }
   }, [])
+
+  useEffect(() => {
+    mountedRef.current = true
+    void runHealthCheck()
+    return () => {
+      mountedRef.current = false
+    }
+  }, [runHealthCheck])
 
   useEffect(() => {
     pushChatContextToIframe()
@@ -126,7 +132,8 @@ export function StudioPanel() {
     return () => window.removeEventListener('message', onMessage)
   }, [studioUrl])
 
-  if (studioUrl) {
+  /** 仅在后端 /health 通过后再挂 iframe，避免未就绪时白屏 */
+  if (studioUrl && status === 'online') {
     return (
       <div className="relative flex-1 h-full min-h-0 overflow-hidden">
         <iframe
@@ -169,17 +176,25 @@ export function StudioPanel() {
           )}
         </motion.div>
 
-        <h2 className="text-2xl font-semibold mb-2">工作室正在接入</h2>
+        <h2 className="text-2xl font-semibold mb-2">
+          {isChecking ? '工作室正在接入' : '无法连接工作室后端'}
+        </h2>
         <p className="text-muted-foreground mb-4">
           {isChecking
             ? '正在检查 Star Office 后端状态...'
-            : '暂时无法连接 Studio 后端，请确认 Python sidecar 已启动。'}
+            : '请确认 Studio API（Python）已启动；桌面端需从主进程成功拉起 studio-api，或在本机先运行 pnpm dev:studio-api。'}
         </p>
         <p className="text-xs text-muted-foreground/80 mb-4">
           目标地址：{studioUrl || buildStudioBaseUrl(process.env.NEXT_PUBLIC_STUDIO_PORT)}
         </p>
-        <Button onClick={() => window.location.reload()} variant="outline" size="sm">
-          重新检查
+        <Button
+          type="button"
+          onClick={() => void runHealthCheck()}
+          variant="outline"
+          size="sm"
+          disabled={isChecking}
+        >
+          {isChecking ? '检查中…' : '重新检查'}
         </Button>
       </motion.div>
     </div>

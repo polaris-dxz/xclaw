@@ -6,7 +6,12 @@ const net = require('net')
 const os = require('os')
 const path = require('path')
 
-const isDev = process.env.NODE_ENV !== 'production'
+/**
+ * 是否按「本地开发」加载 Next 开发服务器、自动打开 DevTools 等。
+ * 打包后的进程里 NODE_ENV 常为 undefined，`undefined !== 'production'` 会误判为 dev，
+ * 从而加载 localhost:20263（Next 开发模式 + 调试按钮），必须用 isPackaged 兜底。
+ */
+const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production'
 
 /** 与菜单栏、About 面板一致的应用展示名（开发模式下 `electron .` 默认会显示 Electron） */
 const APP_DISPLAY_NAME = 'XClaw'
