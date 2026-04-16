@@ -67,6 +67,7 @@ describe('stripAssistantXmlFinalWrapper', () => {
   it('strips lone opening or closing tag when not paired', () => {
     expect(stripAssistantXmlFinalWrapper('<final>hello')).toBe('hello')
     expect(stripAssistantXmlFinalWrapper('world</final>')).toBe('world')
+    expect(stripAssistantXmlFinalWrapper('world</final>  \n')).toBe('world')
   })
 
   it('works before footer strip in pipeline', () => {

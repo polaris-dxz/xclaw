@@ -157,7 +157,12 @@ export function stripAssistantXmlFinalWrapper(raw: string): string {
     t = (m[1].trim() + rest).trimStart()
   }
   t = t.replace(/^<final\b[^>]*>\s*/i, '')
-  t = t.replace(/\s*<\/final\b[^>]*>$/i, '')
+  // 反复剥尾部 </final>，避免末尾空白、多段闭合或模型只输出闭合标签时残留
+  for (let j = 0; j < 16; j += 1) {
+    const next = t.replace(/\s*<\/final\b[^>]*>\s*$/i, '').trimEnd()
+    if (next === t) break
+    t = next
+  }
   return t.trimEnd()
 }
 
