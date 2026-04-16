@@ -617,7 +617,7 @@ export function ChatSidebar({
           </Button>
         </motion.div>
 
-        <motion.div
+        {/* <motion.div
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.98 }}
         >
@@ -628,7 +628,7 @@ export function ChatSidebar({
             <Puzzle className="h-4 w-4" />
             <span>MCP 广场</span>
           </Button>
-        </motion.div>
+        </motion.div> */}
 
         <motion.div
           whileHover={{ scale: 1.02 }}
@@ -645,7 +645,7 @@ export function ChatSidebar({
           </Button>
         </motion.div>
         
-        <motion.div
+        {/* <motion.div
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.98 }}
         >
@@ -658,7 +658,7 @@ export function ChatSidebar({
             <Clock className="h-4 w-4" />
             <span>定时任务</span>
           </Button>
-        </motion.div>
+        </motion.div> */}
         
         {/* 用户信息和设置 */}
         <div
