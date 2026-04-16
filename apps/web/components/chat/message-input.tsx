@@ -2,20 +2,13 @@
 
 import { useState, useRef, KeyboardEvent, useMemo, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { ChevronDown, Brain, Sparkles, ArrowUp, Paperclip, Square } from 'lucide-react'
+import { ChevronDown, Brain, ArrowUp, Paperclip, Square } from 'lucide-react'
 import { useXClawStore, type ChatAttachment } from '@/store'
 import { useChatStore } from '@/lib/store/chat-store'
 import { ModelPicker } from '@/components/chat/model-picker'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
 import { extractMentionQuery, insertMentionAtCursor } from './chat-helpers'
 import { toast } from '@/hooks/use-toast'
 import { STUDIO_COMPOSER_AGENT_SESSION_KEY } from '@/lib/studio/composer-session'
@@ -178,11 +171,6 @@ export function MessageInput({
     const q = mentionFilter.toLowerCase()
     return list.filter((item) => item.name.toLowerCase().includes(q))
   }, [agents, mentionFilter])
-
-  const agentOptions = useMemo(() => {
-    const options = ['all', ...agents.map((agent) => agent.name)]
-    return Array.from(new Set(options))
-  }, [agents])
 
   const MAX_ATTACH_BYTES = 10 * 1024 * 1024
   const MAX_ATTACH_COUNT = 8
@@ -422,41 +410,6 @@ export function MessageInput({
                   />
                 </PopoverContent>
               </Popover>
-              
-              {/* 智能体选择器 */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 min-w-[8.5rem] max-w-[200px] grid grid-cols-[1.125rem_minmax(0,1fr)_1.125rem] items-center gap-x-2 px-2 py-0 font-normal text-muted-foreground hover:text-foreground has-[>svg]:px-2 [&>svg]:!size-4"
-                  >
-                    <Sparkles className="size-4 opacity-90" aria-hidden />
-                    <span className="min-w-0 truncate text-left text-sm leading-none">{selectedAgent}</span>
-                    <ChevronDown className="size-4 justify-self-end opacity-70" aria-hidden />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  align="start"
-                  sideOffset={4}
-                  collisionPadding={12}
-                  className="flex max-h-[min(50vh,22rem)] w-[var(--radix-dropdown-menu-trigger-width)] min-w-[10rem] max-w-[min(calc(100vw-1.5rem),16rem)] flex-col gap-0.5 overflow-y-auto overflow-x-hidden p-1"
-                >
-                  {agentOptions.map((agent) => (
-                    <DropdownMenuItem
-                      key={agent}
-                      onClick={() => setSelectedAgent(agent)}
-                      className={
-                        agent === selectedAgent
-                          ? 'min-h-9 cursor-pointer rounded-md bg-accent px-3 py-2 text-left text-sm font-medium text-accent-foreground'
-                          : 'min-h-9 cursor-pointer rounded-md px-3 py-2 text-left text-sm'
-                      }
-                    >
-                      {agent}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
               <Button
                 variant="ghost"
                 size="sm"
