@@ -14,7 +14,11 @@ import {
 } from '@/store'
 import { hasPersistedAssistantFinalForConversation } from '@/lib/awaiting-reply'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { groupMessagesForDisplay, resolveOutgoingRecipient } from './chat-helpers'
+import {
+  filterVisibleChatMessagesForList,
+  groupMessagesForDisplay,
+  resolveOutgoingRecipient,
+} from './chat-helpers'
 import {
   fetchConversationMessages,
   hydrateChatMessagesAttachments,
@@ -192,7 +196,9 @@ export function ChatPanel() {
   }, [activeConversation, fetchTokenUsage])
 
   const selectedConversation = conversations.find((c) => c.id === activeConversation)
-  const selectedMessages = dedupeMessagesById(chatMessages.filter((msg) => msg.conversation_id === activeConversation))
+  const selectedMessages = dedupeMessagesById(
+    filterVisibleChatMessagesForList(chatMessages.filter((msg) => msg.conversation_id === activeConversation)),
+  )
   const displayGroups = groupMessagesForDisplay(selectedMessages, currentUser)
   const showGatewayAwaitingLoader =
     Boolean(activeConversation) &&

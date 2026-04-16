@@ -6,7 +6,39 @@ const net = require('net')
 const os = require('os')
 const path = require('path')
 
-const isDev = process.env.NODE_ENV !== 'production'
+/**
+ * 是否按「本地开发」加载 Next 开发服务器、自动打开 DevTools 等。
+ * 打包后的进程里 NODE_ENV 常为 undefined，`undefined !== 'production'` 会误判为 dev，
+ * 从而加载 localhost:20263（Next 开发模式 + 调试按钮），必须用 isPackaged 兜底。
+ */
+const isDev = !app.isPackaged && process.env.NODE_ENV !== 'production'
+
+/** 与菜单栏、About 面板一致的应用展示名（开发模式下 `electron .` 默认会显示 Electron） */
+const APP_DISPLAY_NAME = 'XClaw'
+
+/**
+ * macOS：自定义「关于」面板文案与可选图标（需存在 public/about-icon.png）。
+ * 打包后 Dock/程序坞图标由 electron-builder 的 `mac.icon`（.icns）决定。
+ */
+function applyMacAboutPanelOptions() {
+  if (process.platform !== 'darwin') return
+  const aboutIconPng = path.join(__dirname, 'public', 'about-icon.png')
+  const opts = {
+    applicationName: APP_DISPLAY_NAME,
+    applicationVersion: app.getVersion(),
+    copyright: 'Copyright © 2026 XClaw',
+  }
+  if (fs.existsSync(aboutIconPng)) {
+    opts.iconPath = aboutIconPng
+  }
+  try {
+    app.setAboutPanelOptions(opts)
+  } catch (e) {
+    console.warn('[about] setAboutPanelOptions failed:', e.message)
+  }
+}
+
+app.setName(APP_DISPLAY_NAME)
 
 const GITHUB_RELEASE_OWNER = 'polaris-dxz'
 const GITHUB_RELEASE_REPO = 'xclaw'
@@ -354,15 +386,6 @@ function readJsonObject(filePath) {
   }
 }
 
-function readExternalOpenClawPrimaryModel() {
-  const externalConfigPath = path.join(os.homedir(), '.openclaw', 'openclaw.json')
-  const parsed = readJsonObject(externalConfigPath)
-  if (!parsed) return ''
-  const primary = String(parsed?.agents?.defaults?.model?.primary || '').trim()
-  if (!primary || primary.startsWith('xclaw/')) return ''
-  return primary
-}
-
 function syncExternalOpenClawAgentAuthProfiles(paths, agentId = 'main') {
   const sourcePath = path.join(os.homedir(), '.openclaw', 'agents', agentId, 'agent', 'auth-profiles.json')
   const targetPath = path.join(paths.stateDir, 'agents', agentId, 'agent', 'auth-profiles.json')
@@ -374,6 +397,36 @@ function syncExternalOpenClawAgentAuthProfiles(paths, agentId = 'main') {
   } catch (error) {
     console.warn(`[openclaw] failed to sync auth profiles from ~/.openclaw: ${error.message}`)
     return false
+  }
+}
+
+function ensureEmbeddedAgentAuthProfiles(paths, config, agentId = 'main') {
+  try {
+    const agentDir = path.join(paths.stateDir, 'agents', agentId, 'agent')
+    const authPath = path.join(agentDir, 'auth-profiles.json')
+    const auth = readJsonObject(authPath) || { version: 1, profiles: {}, lastGood: {} }
+    if (!auth.profiles || typeof auth.profiles !== 'object') auth.profiles = {}
+    if (!auth.lastGood || typeof auth.lastGood !== 'object') auth.lastGood = {}
+
+    const providers = config?.models?.providers && typeof config.models.providers === 'object' ? config.models.providers : {}
+    const minimax = providers?.minimax && typeof providers.minimax === 'object' ? providers.minimax : null
+    const minimaxKey = minimax ? String(minimax.apiKey || '').trim() : ''
+    const minimaxApi = minimax ? String(minimax.api || '').trim() : ''
+    const minimaxBaseUrl = minimax ? String(minimax.baseUrl || '').trim() : ''
+
+    // Some runtimes treat `anthropic-messages` as requiring `provider=anthropic` auth.
+    // When MiniMax is configured in anthropic-messages compatibility mode, mirror its key to an anthropic profile.
+    if (minimaxKey && minimaxApi === 'anthropic-messages' && minimaxBaseUrl.includes('minimaxi')) {
+      const profileId = 'anthropic:default'
+      if (!auth.profiles[profileId]) {
+        auth.profiles[profileId] = { type: 'api_key', provider: 'anthropic', key: minimaxKey }
+        auth.lastGood.anthropic = profileId
+        ensureDirExists(agentDir)
+        fs.writeFileSync(authPath, `${JSON.stringify(auth, null, 2)}\n`, 'utf8')
+      }
+    }
+  } catch (error) {
+    console.warn(`[openclaw] ensure embedded auth profiles failed: ${error.message}`)
   }
 }
 
@@ -393,21 +446,37 @@ function ensureEmbeddedOpenClawConfig(paths) {
   if (!config.agents.defaults.model || typeof config.agents.defaults.model !== 'object') {
     config.agents.defaults.model = {}
   }
+  // Do NOT migrate default model from ~/.openclaw.
+  // The embedded instance's default model must be explicitly configured by XClaw
+  // (e.g. via Setup Gate / settings), otherwise leave it unset.
   const configuredPrimaryModel = String(config.agents.defaults.model.primary || '').trim()
-  const externalPrimaryModel = readExternalOpenClawPrimaryModel()
-  // Prefer user's existing ~/.openclaw model setting when embedded config is unset.
   if (!configuredPrimaryModel || configuredPrimaryModel.startsWith('xclaw/')) {
-    if (externalPrimaryModel) {
-      config.agents.defaults.model.primary = externalPrimaryModel
-    } else {
-      delete config.agents.defaults.model.primary
-    }
+    delete config.agents.defaults.model.primary
+  }
+
+  // OpenClaw validates config schema strictly. XClaw may store UI-only metadata
+  // inside ~/.xclaw/openclaw.json (e.g. provider display fields, managed keys).
+  // Strip unknown keys before handing the config to embedded OpenClaw.
+  if (config.xclaw && typeof config.xclaw === 'object') {
+    delete config.xclaw
   }
 
   if (config.models && typeof config.models === 'object') {
     const providers = config.models.providers
     if (providers && typeof providers === 'object' && providers.xclaw) {
       delete providers.xclaw
+    }
+    if (providers && typeof providers === 'object') {
+      for (const k of Object.keys(providers)) {
+        const p = providers[k]
+        if (!p || typeof p !== 'object') continue
+        // These fields are used by XClaw UI but not recognized by OpenClaw core schema.
+        delete p.name
+        delete p.notes
+        delete p.website
+        delete p.displayName
+        delete p.xclawManaged
+      }
     }
     if (providers && typeof providers === 'object' && Object.keys(providers).length === 0) {
       delete config.models.providers
@@ -472,6 +541,7 @@ function ensureEmbeddedOpenClawConfig(paths) {
   sanitizeEmbeddedOpenClawPluginsAndChannels(config, discoveredIds)
 
   syncExternalOpenClawAgentAuthProfiles(paths, 'main')
+  ensureEmbeddedAgentAuthProfiles(paths, config, 'main')
 
   fs.writeFileSync(paths.configPath, `${JSON.stringify(config, null, 2)}\n`)
   return config
@@ -1085,6 +1155,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   installOpenClawGatewayOriginHeaderFix()
+  applyMacAboutPanelOptions()
   await startEmbeddedOpenClaw()
   await startStudioBackend()
   startSelectionSidecar()
@@ -1356,7 +1427,7 @@ function installMacApplicationMenu() {
   const handlers = buildShellCommandMenuClickHandlers()
   const template = [
     {
-      label: app.name,
+      label: APP_DISPLAY_NAME,
       submenu: [
         { role: 'about' },
         { type: 'separator' },

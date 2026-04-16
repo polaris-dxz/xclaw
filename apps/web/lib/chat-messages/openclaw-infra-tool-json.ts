@@ -20,10 +20,91 @@ function stripLeadingClientInfraSummary(content: string): string {
   return t.slice(nl + 1).trimStart()
 }
 
+/**
+ * 与 `chat-helpers.extractLeadingJsonObject` 同逻辑；本文件不引用 chat-helpers，避免循环依赖。
+ * 用于「Sender (untrusted…) / 说明文字」前缀后的首段 JSON 对象。
+ */
+function extractLeadingJsonObjectForInfra(content: string): string | null {
+  const t = content.trim()
+  const fenced = /```(?:json)?\s*\n?([\s\S]*?)```/.exec(t)
+  if (fenced) {
+    const inner = fenced[1].trim()
+    if (inner.startsWith('{')) return inner
+  }
+  const start = t.indexOf('{')
+  if (start < 0) return null
+  const end = t.lastIndexOf('}')
+  if (end <= start) return null
+  return t.slice(start, end + 1)
+}
+
+/** 从已知 `{` 下标切出平衡的一层 `{ ... }`（尊重字符串与转义），避免首 `{`…末 `}` 跨多个对象 */
+function sliceBalancedJsonObject(s: string, openBraceIndex: number): string | null {
+  if (openBraceIndex < 0 || openBraceIndex >= s.length || s[openBraceIndex] !== '{') return null
+  let depth = 0
+  let inStr = false
+  let escaped = false
+  for (let i = openBraceIndex; i < s.length; i++) {
+    const ch = s[i]
+    if (inStr) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === '\\') {
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inStr = false
+        continue
+      }
+      continue
+    }
+    if (ch === '"') {
+      inStr = true
+      continue
+    }
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) return s.slice(openBraceIndex, i + 1)
+    }
+  }
+  return null
+}
+
+function collectOpenclawConfigReadJsonCandidates(stripped: string): string[] {
+  const out: string[] = []
+  const push = (s: string | null) => {
+    if (!s || s.length > MAX_PARSE_LEN || !s.startsWith('{')) return
+    if (!out.includes(s)) out.push(s)
+  }
+  const head = stripped.trimStart()
+  if (head.startsWith('{')) push(head)
+
+  const needles = ['\n{"ok":', '\n{ "ok":', '\r\n{"ok":', '\r\n{ "ok":']
+  for (const nd of needles) {
+    let from = 0
+    while (from < stripped.length) {
+      const i = stripped.indexOf(nd, from)
+      if (i < 0) break
+      const brace = stripped.indexOf('{', i)
+      push(sliceBalancedJsonObject(stripped, brace))
+      from = i + 1
+    }
+  }
+  push(extractLeadingJsonObjectForInfra(stripped))
+  return out
+}
+
 function bodyForInfraMatch(content: string): string {
   const t = String(content ?? '').trimStart()
   const stripped = stripLeadingClientInfraSummary(t)
-  return stripped.length > 0 && stripped.startsWith('{') ? stripped : t
+  if (stripped.startsWith('{')) return stripped
+  const extracted = extractLeadingJsonObjectForInfra(stripped)
+  if (extracted) return extracted
+  return stripped.length > 0 ? stripped : t
 }
 
 export function matchOpenclawSessionsListPayload(content: string): SessionsListDumpMatch | null {
@@ -54,23 +135,25 @@ export function matchOpenclawSessionsListPayload(content: string): SessionsListD
 }
 
 export function matchOpenclawConfigFileReadPayload(content: string): { path: string } | null {
-  const t = bodyForInfraMatch(content).trimStart()
-  if (!t.startsWith('{')) return null
-  if (t.length > MAX_PARSE_LEN) return null
-  try {
-    const o = JSON.parse(t) as Record<string, unknown>
-    if (typeof o.ok !== 'boolean') return null
-    const r = o.result
-    if (!r || typeof r !== 'object') return null
-    const res = r as Record<string, unknown>
-    if (typeof res.path !== 'string') return null
-    const p = res.path.toLowerCase()
-    if (!p.endsWith('.json') && !p.includes('openclaw')) return null
-    if (typeof res.raw !== 'string' && typeof res.exists !== 'boolean') return null
-    return { path: res.path }
-  } catch {
-    return null
+  const stripped = stripLeadingClientInfraSummary(String(content ?? '').trimStart())
+  for (const t of collectOpenclawConfigReadJsonCandidates(stripped)) {
+    if (!t.startsWith('{') || t.length > MAX_PARSE_LEN) continue
+    try {
+      const o = JSON.parse(t) as Record<string, unknown>
+      if (typeof o.ok !== 'boolean') continue
+      const r = o.result
+      if (!r || typeof r !== 'object') continue
+      const res = r as Record<string, unknown>
+      if (typeof res.path !== 'string') continue
+      const p = res.path.toLowerCase()
+      if (!p.endsWith('.json') && !p.includes('openclaw')) continue
+      if (typeof res.raw !== 'string' && typeof res.exists !== 'boolean') continue
+      return { path: res.path }
+    } catch {
+      continue
+    }
   }
+  return null
 }
 
 export function matchAnyOpenclawGatewayInfraPayload(content: string): 'sessions' | 'config' | null {

@@ -1,19 +1,14 @@
 'use client'
 
 import { useState, useRef, KeyboardEvent, useMemo, useEffect } from 'react'
-import Link from 'next/link'
 import { motion } from 'framer-motion'
-import { ChevronDown, Brain, Sparkles, ArrowUp, Paperclip, Square } from 'lucide-react'
+import { ChevronDown, Brain, ArrowUp, Paperclip, Square } from 'lucide-react'
 import { useXClawStore, type ChatAttachment } from '@/store'
+import { useChatStore } from '@/lib/store/chat-store'
+import { ModelPicker } from '@/components/chat/model-picker'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { extractMentionQuery, insertMentionAtCursor } from './chat-helpers'
 import { toast } from '@/hooks/use-toast'
 import { STUDIO_COMPOSER_AGENT_SESSION_KEY } from '@/lib/studio/composer-session'
@@ -68,7 +63,11 @@ export function MessageInput({
     activeConversation != null &&
     awaitingConversationId === activeConversation
   const showStopButton = showStopForAwaiting || isSendingMessage
-  const [selectedModel, setSelectedModel] = useState('default')
+  const selectedModelRef = useChatStore((s) => s.selectedModelRef)
+  const setSelectedModelRef = useChatStore((s) => s.setSelectedModelRef)
+  const customModels = useChatStore((s) => s.customModels)
+  const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  const modelTriggerRef = useRef<HTMLDivElement>(null)
   const [chatModelOptions, setChatModelOptions] = useState<ChatModelOption[]>([
     { ref: 'default', label: '跟随系统默认' },
   ])
@@ -81,18 +80,20 @@ export function MessageInput({
   const [mentionIndex, setMentionIndex] = useState(0)
 
   const selectedModelLabel = useMemo(() => {
-    const hit = chatModelOptions.find((o) => o.ref === selectedModel)
-    return hit?.label || selectedModel
-  }, [chatModelOptions, selectedModel])
+    const hit = chatModelOptions.find((o) => o.ref === selectedModelRef)
+    if (hit) return hit.label
+    const custom = customModels.find((m) => m.ref === selectedModelRef)
+    return custom?.name || selectedModelRef
+  }, [chatModelOptions, selectedModelRef, customModels])
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem(LOCAL_SELECTED_MODEL_KEY)
-      if (saved) setSelectedModel(saved)
+      if (saved) setSelectedModelRef(saved)
     } catch {
       // ignore persisted model read errors
     }
-  }, [])
+  }, [setSelectedModelRef])
 
   useEffect(() => {
     try {
@@ -146,10 +147,10 @@ export function MessageInput({
         try {
           const saved = localStorage.getItem(LOCAL_SELECTED_MODEL_KEY)
           if (saved && opts.some((o: ChatModelOption) => o.ref === saved)) {
-            setSelectedModel(saved)
+            setSelectedModelRef(saved)
           } else if (typeof data?.primary === 'string' && data.primary.trim()) {
             const p = data.primary.trim()
-            if (opts.some((o: ChatModelOption) => o.ref === p)) setSelectedModel(p)
+            if (opts.some((o: ChatModelOption) => o.ref === p)) setSelectedModelRef(p)
           }
         } catch {
           // ignore
@@ -170,11 +171,6 @@ export function MessageInput({
     const q = mentionFilter.toLowerCase()
     return list.filter((item) => item.name.toLowerCase().includes(q))
   }, [agents, mentionFilter])
-
-  const agentOptions = useMemo(() => {
-    const options = ['all', ...agents.map((agent) => agent.name)]
-    return Array.from(new Set(options))
-  }, [agents])
 
   const MAX_ATTACH_BYTES = 10 * 1024 * 1024
   const MAX_ATTACH_COUNT = 8
@@ -252,7 +248,7 @@ export function MessageInput({
         message.trim(),
         attachments.length > 0 ? attachments : undefined,
         selectedAgent,
-        selectedModel,
+        selectedModelRef,
       )
       setMessage('')
       setChatInput('')
@@ -301,7 +297,7 @@ export function MessageInput({
   }
 
   const handleModelSelect = (value: string) => {
-    setSelectedModel(value)
+    setSelectedModelRef(value)
     try {
       localStorage.setItem(LOCAL_SELECTED_MODEL_KEY, value)
     } catch {
@@ -379,85 +375,41 @@ export function MessageInput({
           {/* 底部工具栏 */}
           <div className="flex items-center justify-between px-3 py-2 border-t border-border/30">
             <div className="flex items-center gap-2">
-              {/* 模型选择器 */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 min-w-[8.5rem] max-w-[min(280px,55vw)] grid grid-cols-[1.125rem_minmax(0,1fr)_1.125rem] items-center gap-x-2 px-2 py-0 font-normal text-muted-foreground hover:text-foreground has-[>svg]:px-2 [&>svg]:!size-4"
-                  >
-                    <Brain className="size-4 opacity-90" aria-hidden />
-                    <span className="min-w-0 truncate text-left text-sm leading-none">{selectedModelLabel}</span>
-                    <ChevronDown className="size-4 justify-self-end opacity-70" aria-hidden />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
+              {/* 模型选择器（ModelPicker + zustand，与 mc-selected-model 兼容） */}
+              <Popover open={modelPickerOpen} onOpenChange={setModelPickerOpen}>
+                <PopoverAnchor asChild>
+                  <div ref={modelTriggerRef} className="inline-flex">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 min-w-[8.5rem] max-w-[min(280px,55vw)] grid grid-cols-[1.125rem_minmax(0,1fr)_1.125rem] items-center gap-x-2 px-2 py-0 font-normal text-muted-foreground hover:text-foreground has-[>svg]:px-2 [&>svg]:!size-4"
+                      onClick={() => setModelPickerOpen((v) => !v)}
+                    >
+                      <Brain className="size-4 opacity-90" aria-hidden />
+                      <span className="min-w-0 truncate text-left text-sm leading-none">{selectedModelLabel}</span>
+                      <ChevronDown
+                        className={`size-4 justify-self-end opacity-70 transition-transform ${modelPickerOpen ? 'rotate-180' : ''}`}
+                        aria-hidden
+                      />
+                    </Button>
+                  </div>
+                </PopoverAnchor>
+                <PopoverContent
+                  side="top"
                   align="start"
-                  sideOffset={4}
-                  alignOffset={0}
+                  sideOffset={8}
                   collisionPadding={12}
-                  className="flex max-h-[min(50vh,22rem)] w-[var(--radix-dropdown-menu-trigger-width)] min-w-[11rem] max-w-[min(calc(100vw-1.5rem),20rem)] flex-col gap-0.5 overflow-y-auto overflow-x-hidden p-1"
+                  className="border-0 bg-transparent p-0 shadow-none"
                 >
-                  {chatModelOptions.map((opt) => (
-                    <DropdownMenuItem
-                      key={opt.ref}
-                      onClick={() => handleModelSelect(opt.ref)}
-                      className={
-                        opt.ref === selectedModel
-                          ? 'min-h-9 cursor-pointer rounded-md bg-accent px-3 py-2 text-left text-sm font-medium text-accent-foreground'
-                          : 'min-h-9 cursor-pointer rounded-md px-3 py-2 text-left text-sm'
-                      }
-                    >
-                      {opt.label}
-                    </DropdownMenuItem>
-                  ))}
-                  <DropdownMenuSeparator className="my-0.5 shrink-0 bg-border" />
-                  <DropdownMenuItem asChild>
-                    <Link
-                      href="/settings/management/models"
-                      className="flex min-h-9 w-full cursor-pointer items-center rounded-md px-3 py-2 text-left text-sm text-primary no-underline hover:bg-accent hover:text-primary"
-                    >
-                      添加自定义模型…
-                    </Link>
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-              
-              {/* 智能体选择器 */}
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 min-w-[8.5rem] max-w-[200px] grid grid-cols-[1.125rem_minmax(0,1fr)_1.125rem] items-center gap-x-2 px-2 py-0 font-normal text-muted-foreground hover:text-foreground has-[>svg]:px-2 [&>svg]:!size-4"
-                  >
-                    <Sparkles className="size-4 opacity-90" aria-hidden />
-                    <span className="min-w-0 truncate text-left text-sm leading-none">{selectedAgent}</span>
-                    <ChevronDown className="size-4 justify-self-end opacity-70" aria-hidden />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  align="start"
-                  sideOffset={4}
-                  collisionPadding={12}
-                  className="flex max-h-[min(50vh,22rem)] w-[var(--radix-dropdown-menu-trigger-width)] min-w-[10rem] max-w-[min(calc(100vw-1.5rem),16rem)] flex-col gap-0.5 overflow-y-auto overflow-x-hidden p-1"
-                >
-                  {agentOptions.map((agent) => (
-                    <DropdownMenuItem
-                      key={agent}
-                      onClick={() => setSelectedAgent(agent)}
-                      className={
-                        agent === selectedAgent
-                          ? 'min-h-9 cursor-pointer rounded-md bg-accent px-3 py-2 text-left text-sm font-medium text-accent-foreground'
-                          : 'min-h-9 cursor-pointer rounded-md px-3 py-2 text-left text-sm'
-                      }
-                    >
-                      {agent}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
+                  <ModelPicker
+                    onClose={() => setModelPickerOpen(false)}
+                    gatewayOptions={chatModelOptions}
+                    selectedRef={selectedModelRef}
+                    onSelectRef={handleModelSelect}
+                  />
+                </PopoverContent>
+              </Popover>
               <Button
                 variant="ghost"
                 size="sm"

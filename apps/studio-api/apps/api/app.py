@@ -1404,14 +1404,23 @@ def agent_push():
         return jsonify({"ok": False, "msg": str(e)}), 500
 
 
-@app.route("/health", methods=["GET"])
+@app.route("/health", methods=["GET", "OPTIONS"])
 def health():
-    """Health check"""
-    return jsonify({
+    """Health check（CORS：便于 XClaw Web 从其它源对 /health 做 fetch 探活）"""
+    if request.method == "OPTIONS":
+        r = make_response("", 204)
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        r.headers["Access-Control-Max-Age"] = "86400"
+        return r
+    r = jsonify({
         "status": "ok",
         "service": "star-office-ui",
         "timestamp": datetime.now().isoformat(),
     })
+    r.headers["Access-Control-Allow-Origin"] = "*"
+    r.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+    return r
 
 
 @app.route("/yesterday-memo", methods=["GET"])

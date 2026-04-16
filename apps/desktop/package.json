@@ -1,5 +1,6 @@
 {
   "name": "@xclaw/desktop",
+  "productName": "XClaw",
   "version": "0.1.0",
   "private": true,
   "main": "main.js",

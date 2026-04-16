@@ -5,6 +5,7 @@ import { mutationLimiter } from '@/lib/rate-limit'
 import { callOpenClawGateway, unwrapGatewayRpcResult } from '@/lib/openclaw-gateway'
 import { logger } from '@/lib/logger'
 import { isGatewayDuplicateLabelError, MAX_LABEL, truncateSessionLabel } from '@/lib/session-label'
+import { loadModelStoreState } from '@/lib/openclaw-model-store'
 
 /** 新建 gw 会话时尚无首条消息，API 返回给前端的占位名（真正标题在首条用户消息里写入 Gateway） */
 const PLACEHOLDER_SESSION_LABEL = '新对话'
@@ -131,6 +132,32 @@ export async function POST(request: NextRequest) {
 
   const rateCheck = mutationLimiter(request)
   if (rateCheck) return rateCheck
+
+  // Setup Gate backend safety net:
+  // If no default model is configured, we should not allow creating new chat sessions
+  // because downstream calls depend on an effective model.
+  try {
+    const state = loadModelStoreState('main')
+    if (!state?.primary || !String(state.primary).trim()) {
+      return NextResponse.json(
+        {
+          error: '默认模型未配置，请先完成模型选择',
+          code: 'MODEL_NOT_CONFIGURED',
+          setupPath: '/setup/models',
+        },
+        { status: 428 },
+      )
+    }
+  } catch (e) {
+    return NextResponse.json(
+      {
+        error: '无法读取模型配置，请先完成模型选择',
+        code: 'MODEL_CONFIG_UNAVAILABLE',
+        setupPath: '/setup/models',
+      },
+      { status: 428 },
+    )
+  }
 
   let body: Record<string, unknown> = {}
   try {

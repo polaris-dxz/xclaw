@@ -9,6 +9,30 @@ import { parseJsonFromCliStdout } from '@/lib/strip-ansi-codes'
 
 const gatewayInternalUrl = `http://${config.gatewayHost}:${config.gatewayPort}`
 
+/**
+ * `fetch` 的 `signal` 往往在收到响应头后即结束等待；若对端 200 后迟迟不结束正文，`res.json()` 会无限挂起。
+ */
+async function readJsonWithTimeout<T>(res: Response, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      void res.body?.cancel().catch(() => {})
+      reject(new Error(`Gateway response JSON exceeded ${timeoutMs}ms`))
+    }, timeoutMs)
+    void res
+      .json()
+      .then(
+        (data) => {
+          clearTimeout(timer)
+          resolve(data as T)
+        },
+        (err) => {
+          clearTimeout(timer)
+          reject(err)
+        },
+      )
+  })
+}
+
 function gatewayHeaders(): Record<string, string> {
   const token = getDetectedGatewayToken()
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -269,7 +293,7 @@ export async function GET(request: NextRequest) {
         throw new Error(`Gateway channel probe failed with status ${res.status}`)
       }
 
-      const data = await res.json()
+      const data = await readJsonWithTimeout<GatewayData>(res, 10000)
       return NextResponse.json(data)
     } catch (err) {
       try {
@@ -302,7 +326,7 @@ export async function GET(request: NextRequest) {
       throw new Error(`Gateway channel status failed with status ${res.status}`)
     }
 
-    const data = await res.json()
+    const data = await readJsonWithTimeout<GatewayData>(res, 10000)
     return NextResponse.json(transformGatewayChannels(data))
   } catch (err) {
     try {

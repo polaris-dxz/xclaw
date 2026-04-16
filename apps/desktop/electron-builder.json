@@ -1,6 +1,6 @@
 {
   "appId": "com.xclaw.app",
-  "productName": "xclaw",
+  "productName": "XClaw",
   "publish": {
     "provider": "github",
     "owner": "polaris-dxz",

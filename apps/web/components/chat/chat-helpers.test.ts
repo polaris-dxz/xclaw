@@ -7,10 +7,12 @@ import {
   extractLeadingJsonObject,
   looksLikeGatewayToolProcessJson,
   stripOpenClawAssistantFooter,
+  stripAssistantXmlFinalWrapper,
   isGatewaySyntheticUserContext,
   isThinkingProcessMessage,
   groupMessagesForDisplay,
   isUserChatMessage,
+  filterVisibleChatMessagesForList,
 } from './chat-helpers'
 import type { ChatMessage } from '../../store'
 import { shouldClearAwaitingReplyForMessage } from '../../lib/awaiting-reply'
@@ -48,6 +50,28 @@ describe('stripOpenClawAssistantFooter', () => {
 
   it('leaves unrelated text unchanged', () => {
     expect(stripOpenClawAssistantFooter('你好')).toBe('你好')
+  })
+})
+
+describe('stripAssistantXmlFinalWrapper', () => {
+  it('removes outer final tags and leaves body', () => {
+    const body = '<final>第一段\n\n第二段</final>'
+    expect(stripAssistantXmlFinalWrapper(body)).toBe('第一段\n\n第二段')
+  })
+
+  it('handles case-insensitive tags and strips nested wrappers', () => {
+    expect(stripAssistantXmlFinalWrapper('<FINAL>x</FINAL>')).toBe('x')
+    expect(stripAssistantXmlFinalWrapper('<final><final>y</final></final>')).toBe('y')
+  })
+
+  it('strips lone opening or closing tag when not paired', () => {
+    expect(stripAssistantXmlFinalWrapper('<final>hello')).toBe('hello')
+    expect(stripAssistantXmlFinalWrapper('world</final>')).toBe('world')
+  })
+
+  it('works before footer strip in pipeline', () => {
+    const raw = '<final>答</final>\n\n🦞 OpenClaw 2026\n🧵 Session: x'
+    expect(stripOpenClawAssistantFooter(stripAssistantXmlFinalWrapper(raw))).toBe('答')
   })
 })
 
@@ -101,6 +125,17 @@ function msg(partial: Partial<ChatMessage> & Pick<ChatMessage, 'id' | 'content' 
   } as ChatMessage
 }
 
+describe('filterVisibleChatMessagesForList', () => {
+  it('keeps only message_type text', () => {
+    const rows = [
+      msg({ id: 1, content: 'hi', created_at: 1, message_type: 'text' }),
+      msg({ id: 2, content: '{}', created_at: 2, message_type: 'tool_call' }),
+      msg({ id: 3, content: 'x', created_at: 3, message_type: 'status', metadata: { phase: 'error' } }),
+    ]
+    expect(filterVisibleChatMessagesForList(rows).map((m) => m.id)).toEqual([1])
+  })
+})
+
 describe('gateway infra JSON must not be treated as human user', () => {
   it('isUserChatMessage is false for sessions dump on user row', () => {
     const raw = JSON.stringify({
@@ -121,7 +156,7 @@ describe('gateway infra JSON must not be treated as human user', () => {
       metadata: { role: 'user', source: 'jsonl-disk-sync' },
     })
     expect(isUserChatMessage(m, null)).toBe(false)
-    expect(isThinkingProcessMessage(m, null)).toBe(false)
+    expect(isThinkingProcessMessage(m, null)).toBe(true)
   })
 })
 
@@ -214,6 +249,26 @@ describe('isGatewaySyntheticUserContext / gateway user vs real user', () => {
     expect(isThinkingProcessMessage(messages[0], null)).toBe(false)
     const groups = groupMessagesForDisplay(messages, null)
     expect(groups.map((g) => g.type)).toEqual(['assistant_block'])
+  })
+
+  it('jsonl-sync tool_result row (message_type tool_call) is thinking', () => {
+    const m = msg({
+      id: 32,
+      content: 'tool_result:call_function_x',
+      message_type: 'tool_call',
+      created_at: 1,
+      from_agent: 'main',
+      to_agent: 'user',
+      metadata: {
+        event: 'tool_call',
+        toolName: 'tool_result',
+        toolUseId: 'call_function_x',
+        output: JSON.stringify({ url: 'https://en.wikipedia.org/wiki/Oppenheimer_(film)', status: 200 }),
+        source: 'jsonl-disk-sync',
+      },
+    })
+    expect(isThinkingProcessMessage(m, null)).toBe(true)
+    expect(groupMessagesForDisplay([m], null).map((g) => g.type)).toEqual(['thinking_group'])
   })
 
   it('assistant skill-install ack is merged into thinking timeline, final answer stays a block', () => {

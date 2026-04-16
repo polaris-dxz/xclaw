@@ -21,6 +21,18 @@ function isSilentReplyText(text: string): boolean {
   return SILENT_REPLY_PATTERN.test(text.trim())
 }
 
+/** OpenClaw jsonl：`role: "toolResult"`，`content` 常为 `[{ type:"text", text:"..." }]` */
+function extractToolResultBodyText(content: unknown): string {
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((c: { type?: string; text?: string }) =>
+      c && typeof c === 'object' && typeof c.text === 'string' ? c.text : '',
+    )
+    .join('\n')
+    .trim()
+}
+
 function parseTranscriptParts(content: unknown): MessageContentPart[] {
   const parts: MessageContentPart[] = []
 
@@ -41,23 +53,46 @@ function parseTranscriptParts(content: unknown): MessageContentPart[] {
       }
     } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
       parts.push({ type: 'thinking', thinking: block.thinking.slice(0, 4000) })
-    } else if (block.type === 'tool_use') {
+    } else if (
+      block.type === 'tool_use' ||
+      block.type === 'toolCall' ||
+      String(block.type).toLowerCase() === 'toolcall'
+    ) {
+      const name = block.name || 'unknown'
+      const id = block.id || ''
+      const rawInput = block.type === 'tool_use' ? block.input : block.arguments
+      const inputStr =
+        typeof rawInput === 'string'
+          ? rawInput.slice(0, 500)
+          : JSON.stringify(rawInput ?? {}).slice(0, 500)
       parts.push({
         type: 'tool_use',
-        id: block.id || '',
-        name: block.name || 'unknown',
-        input: JSON.stringify(block.input || {}).slice(0, 500),
+        id,
+        name,
+        input: inputStr,
       })
-    } else if (block.type === 'tool_result') {
-      const resultContent = typeof block.content === 'string' ? block.content
-        : Array.isArray(block.content) ? block.content.map((c: any) => c?.text || '').join('\n')
-        : ''
+    } else if (
+      block.type === 'tool_result' ||
+      String(block.type || '')
+        .toLowerCase()
+        .replace(/-/g, '_') === 'toolresult'
+    ) {
+      const toolUseId = String(
+        (block as { tool_use_id?: string; toolCallId?: string }).tool_use_id ||
+          (block as { toolCallId?: string }).toolCallId ||
+          '',
+      ).trim()
+      const resultContent = typeof block.content === 'string'
+        ? block.content
+        : Array.isArray(block.content)
+          ? block.content.map((c: any) => c?.text || '').join('\n')
+          : ''
       if (resultContent.trim()) {
         parts.push({
           type: 'tool_result',
-          toolUseId: block.tool_use_id || '',
+          toolUseId,
           content: resultContent.trim().slice(0, 8000),
-          isError: block.is_error === true,
+          isError: block.is_error === true || (block as { isError?: boolean }).isError === true,
         })
       }
     }
@@ -85,11 +120,36 @@ function partsFromGatewayPartsArray(rawParts: unknown[]): MessageContentPart[] {
 }
 
 function normalizeTranscriptMessage(msg: any, timestamp?: string): TranscriptMessage | null {
-  const role = msg?.role === 'assistant' ? 'assistant' as const
-    : msg?.role === 'system' ? 'system' as const
-    : 'user' as const
-
   const base = msg?.message && typeof msg.message === 'object' ? msg.message : msg
+  const roleRaw = String(base?.role ?? msg?.role ?? '').trim().toLowerCase()
+
+  /**
+   * OpenClaw `sessions/*.jsonl`：`type:"message"` + `message.role:"toolResult"` + toolName/toolCallId。
+   * 若按普通 user 解析会把整段工具 JSON 当用户正文（web_fetch、gateway 读配置等）。
+   */
+  if (roleRaw === 'toolresult' || roleRaw === 'tool_result') {
+    const toolUseId = String(base.toolCallId ?? base.tool_call_id ?? '').trim()
+    const resultText = extractToolResultBodyText(base.content ?? base.text)
+    if (!resultText) return null
+    const isErr = base.isError === true || base.is_error === true
+    return {
+      role: 'assistant',
+      parts: [
+        {
+          type: 'tool_result',
+          toolUseId,
+          content: resultText.slice(0, 8000),
+          isError: isErr,
+        },
+      ],
+      timestamp,
+    }
+  }
+
+  const roleStr = String(base?.role ?? msg?.role ?? '').trim()
+  const role = roleStr === 'assistant' ? ('assistant' as const)
+    : roleStr === 'system' ? ('system' as const)
+    : ('user' as const)
 
   let parts = parseTranscriptParts(base?.content ?? base?.text ?? msg?.content ?? msg?.text)
   if (parts.length === 0 && Array.isArray(base?.parts)) {
@@ -123,11 +183,19 @@ export function parseJsonlTranscript(raw: string, limit: number): TranscriptMess
 
     if (entry.type !== 'message' || !entry.message) continue
 
-    const msg = entry.message
+    const msg = entry.message as Record<string, unknown>
+    const topRole =
+      typeof (entry as Record<string, unknown>).role === 'string'
+        ? String((entry as Record<string, unknown>).role).trim()
+        : ''
+    const innerRole = typeof msg.role === 'string' ? msg.role.trim() : ''
+    /** 部分 jsonl 把 `role` 写在顶层，`message` 内无 role（否则 toolResult 会被误判为用户正文） */
+    const mergedMsg = innerRole ? msg : topRole ? ({ ...msg, role: topRole } as Record<string, unknown>) : msg
     const ts = typeof entry.timestamp === 'string' ? entry.timestamp
-      : typeof msg.timestamp === 'string' ? msg.timestamp
-      : undefined
-    const normalized = normalizeTranscriptMessage(msg, ts)
+      : typeof (msg as { timestamp?: string }).timestamp === 'string'
+        ? (msg as { timestamp?: string }).timestamp
+        : undefined
+    const normalized = normalizeTranscriptMessage(mergedMsg, ts)
     if (normalized) {
       normalized.rawJsonlLine = line
       out.push(normalized)

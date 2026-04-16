@@ -1,5 +1,9 @@
 /**
- * 灵感广场：分类与模板数据（与详情弹窗文案一致）
+ * 灵感广场：内置分类与模板数据（用于 DB seed / UI 分类标签）。
+ *
+ * 说明：
+ * - 这份“内置模板”会在 migrations 中 seed 到 SQLite。
+ * - UI 读取时以 DB 为准（支持后续在 DB 中编辑/删除）。
  */
 
 export type InspirationCategoryId =
@@ -122,9 +126,7 @@ export const INSPIRATION_ITEMS: InspirationItem[] = [
       { text: '「9:00」', highlight: true },
       { text: '的自动定时任务，检索今日发布的与' },
       { text: '「AI/大模型」', highlight: true },
-      {
-        text: '相关的热点与行业报告要点，整理成结构化简报，并标注深度阅读内容。',
-      },
+      { text: '相关的热点与行业报告要点，整理成结构化简报，并标注深度阅读内容。' },
     ],
   },
   {
@@ -162,12 +164,7 @@ export const INSPIRATION_ITEMS: InspirationItem[] = [
       { text: '「21:00」', highlight: true },
       { text: '后，如果你还在线，虾哥会自动出现陪你聊天。' },
     ],
-    promptExtraParts: [
-      {
-        text: '【不想被打扰？】说「虾哥别吵我」→ 当晚免打扰',
-        highlight: true,
-      },
-    ],
+    promptExtraParts: [{ text: '【不想被打扰？】说「虾哥别吵我」→ 当晚免打扰', highlight: true }],
   },
   {
     id: 'lazy-travel',
@@ -185,9 +182,7 @@ export const INSPIRATION_ITEMS: InspirationItem[] = [
       { text: '「周末」', highlight: true },
       { text: '的出行方案，我在' },
       { text: '「深圳南山区」', highlight: true },
-      {
-        text: '。步骤：1. 使用 weather skill 查询周末天气；2. 根据我的位置和天气，推荐',
-      },
+      { text: '。步骤：1. 使用 weather skill 查询周末天气；2. 根据我的位置和天气，推荐' },
       { text: '「车程1小时内」', highlight: true },
       {
         text: '的目的地；3. 制定详细行程。要求：1. 目的地分3类：海边、山林、文艺；2. 包含车程、特色、适合人群；3. 有具体时间安排。',
@@ -316,9 +311,7 @@ export const INSPIRATION_ITEMS: InspirationItem[] = [
       { text: '【晚上】', highlight: true },
       { text: '想吃一顿' },
       { text: '【不是太寡淡的健康餐】', highlight: true },
-      {
-        text: '，帮我推荐一份饮食清单。并且找到距离我最近的商家店铺地址和路线，我在',
-      },
+      { text: '，帮我推荐一份饮食清单。并且找到距离我最近的商家店铺地址和路线，我在' },
       { text: '【深圳南山区腾讯大厦】', highlight: true },
       { text: '。' },
     ],
@@ -355,3 +348,4 @@ export function filterItemsByCategory(
   if (categoryId === 'all') return items
   return items.filter((i) => i.categoryId === categoryId)
 }
+

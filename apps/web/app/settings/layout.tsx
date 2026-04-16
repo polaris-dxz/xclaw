@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { SettingsSidebar } from '@/components/settings/settings-sidebar'
 import { useEffect, useState } from 'react'
+import { useModelSetupGate } from '@/lib/use-model-setup-gate'
 
 export default function SettingsLayout({
   children,
@@ -13,6 +14,7 @@ export default function SettingsLayout({
   children: React.ReactNode
 }) {
   const [desktopTopInset, setDesktopTopInset] = useState(0)
+  useModelSetupGate()
 
   useEffect(() => {
     const electronApi = (window as Window & { electronAPI?: { platform?: string } }).electronAPI
