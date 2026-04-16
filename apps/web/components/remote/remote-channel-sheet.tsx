@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowUpRight,
   Eye,
@@ -38,6 +39,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
+import { CHANNELS_SNAPSHOT_QUERY_KEY, fetchChannelsSnapshot } from '@/lib/channels-snapshot-query'
 import { REMOTE_CHANNEL_LABELS, type RemoteChannelBindPlatform } from '@/lib/remote-channel-labels'
 
 export const REMOTE_CHANNEL_GUIDES = {
@@ -52,10 +54,6 @@ export const REMOTE_CHANNEL_GUIDES = {
 } as const
 
 type PlatformId = 'weixin' | 'wechat_access' | 'wecom' | 'qq' | 'feishu' | 'dingtalk'
-
-type ChannelSnapshot = {
-  channels?: Record<string, { configured?: boolean }>
-}
 
 const PLATFORMS: {
   id: PlatformId
@@ -181,30 +179,27 @@ export function RemoteChannelSheet({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const [snapshot, setSnapshot] = useState<ChannelSnapshot | null>(null)
-  const [loadingStatus, setLoadingStatus] = useState(false)
+  const queryClient = useQueryClient()
   const [active, setActive] = useState<PlatformId | null>(null)
 
-  const loadStatus = useCallback(async () => {
-    setLoadingStatus(true)
-    try {
-      const res = await fetch('/api/channels', { cache: 'no-store', credentials: 'include' })
-      const data = await res.json()
-      if (!res.ok) {
-        setSnapshot(null)
-        return
-      }
-      setSnapshot(data as ChannelSnapshot)
-    } catch {
-      setSnapshot(null)
-    } finally {
-      setLoadingStatus(false)
-    }
-  }, [])
+  const {
+    data: snapshot,
+    isPending,
+    isFetching,
+    isError,
+    refetch,
+  } = useQuery({
+    queryKey: CHANNELS_SNAPSHOT_QUERY_KEY,
+    queryFn: fetchChannelsSnapshot,
+    enabled: open,
+    staleTime: 60_000,
+  })
 
-  useEffect(() => {
-    if (open) void loadStatus()
-  }, [open, loadStatus])
+  /** 首次打开、尚无缓存：只影响按钮区骨架，不挡整页内容 */
+  const awaitingChannelSnapshot =
+    open && !snapshot && (isPending || isFetching)
+  const configLoadError = open && !snapshot && isError && !isFetching
+  const backgroundRefresh = open && !!snapshot && isFetching && !isPending
 
   const configuredMap = useMemo(() => {
     const m: Record<string, boolean> = {}
@@ -221,72 +216,105 @@ export function RemoteChannelSheet({
       <Sheet open={open} onOpenChange={onOpenChange}>
         <SheetContent side="right" className="w-full sm:max-w-2xl flex flex-col gap-0 p-0 overflow-hidden">
           <SheetHeader className="px-6 pt-6 pb-2 text-left space-y-2 border-b border-border/50">
-            <SheetTitle className="text-base font-medium text-muted-foreground">
-              接入远控通道，用户可以直接在聊天工具中与 xclaw 对话交互
-            </SheetTitle>
+            <div className="flex items-start justify-between gap-3">
+              <SheetTitle className="text-base font-medium text-muted-foreground">
+                接入远控通道，用户可以直接在聊天工具中与 xclaw 对话交互
+              </SheetTitle>
+              {backgroundRefresh ? (
+                <span className="text-xs text-muted-foreground flex items-center gap-1.5 shrink-0 mt-0.5">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  更新中
+                </span>
+              ) : null}
+            </div>
             <SheetDescription className="sr-only">配置 QQ、微信、企业微信、飞书、钉钉等远控通道</SheetDescription>
           </SheetHeader>
-          <div className="flex-1 overflow-y-auto px-6 py-5 bg-muted/30">
-            {loadingStatus ? (
-              <p className="text-sm text-muted-foreground flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                加载通道状态…
-              </p>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {PLATFORMS.map((p) => (
-                  <div
-                    key={p.id}
-                    className="rounded-2xl border border-border/60 bg-card p-4 shadow-sm flex flex-col gap-3"
-                  >
-                    <div className="flex items-start gap-3">
-                      <div
-                        className={cn(
-                          'h-11 w-11 rounded-xl shrink-0 flex items-center justify-center text-white text-xs font-bold',
-                          p.logoClass,
-                        )}
-                      >
-                        {p.name.slice(0, 2)}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-semibold text-foreground">{p.name}</span>
-                          {p.recommended ? (
-                            <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-0 text-[10px] px-1.5 py-0">
-                              推荐
-                            </Badge>
-                          ) : null}
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{p.description}</p>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-end gap-2 mt-auto pt-1">
-                      <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground shrink-0">
-                        <MoreHorizontal className="h-4 w-4" />
-                      </Button>
-                      {configuredMap[p.id] ? (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="rounded-full px-5"
-                          onClick={() => setActive(p.id)}
-                        >
-                          已配置
-                        </Button>
-                      ) : (
-                        <Button
-                          size="sm"
-                          className="rounded-full px-5 bg-foreground text-background hover:bg-foreground/90"
-                          onClick={() => setActive(p.id)}
-                        >
-                          配置
-                        </Button>
+          <div
+            className="flex-1 overflow-y-auto px-6 py-5 bg-muted/30 space-y-4"
+            aria-busy={awaitingChannelSnapshot}
+          >
+            {configLoadError ? (
+              <div className="rounded-xl border border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm flex flex-wrap items-center justify-between gap-2">
+                <span className="text-muted-foreground">无法加载通道状态，请检查网络后重试。</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="rounded-full h-8 shrink-0"
+                  onClick={() => void refetch()}
+                >
+                  重试
+                </Button>
+              </div>
+            ) : null}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {PLATFORMS.map((p) => (
+                <div
+                  key={p.id}
+                  className="rounded-2xl border border-border/60 bg-card p-4 shadow-sm flex flex-col gap-3"
+                >
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={cn(
+                        'h-11 w-11 rounded-xl shrink-0 flex items-center justify-center text-white text-xs font-bold',
+                        p.logoClass,
                       )}
+                    >
+                      {p.name.slice(0, 2)}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-semibold text-foreground">{p.name}</span>
+                        {p.recommended ? (
+                          <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-0 text-[10px] px-1.5 py-0">
+                            推荐
+                          </Badge>
+                        ) : null}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">{p.description}</p>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
+                  <div className="flex items-center justify-end gap-2 mt-auto pt-1">
+                    {awaitingChannelSnapshot || configLoadError ? (
+                      <>
+                        <div
+                          className="h-8 w-8 rounded-md bg-muted/70 animate-pulse shrink-0"
+                          aria-hidden
+                        />
+                        <div
+                          className="h-8 min-w-22 rounded-full bg-muted/70 animate-pulse shrink-0"
+                          aria-hidden
+                        />
+                      </>
+                    ) : (
+                      <>
+                        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground shrink-0">
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
+                        {configuredMap[p.id] ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full px-5"
+                            onClick={() => setActive(p.id)}
+                          >
+                            已配置
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            className="rounded-full px-5 bg-foreground text-background hover:bg-foreground/90"
+                            onClick={() => setActive(p.id)}
+                          >
+                            配置
+                          </Button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </SheetContent>
       </Sheet>
@@ -303,7 +331,7 @@ export function RemoteChannelSheet({
               isConfigured={active ? !!configuredMap[active] : false}
               onClose={() => setActive(null)}
               onSuccess={() => {
-                void loadStatus()
+                void queryClient.invalidateQueries({ queryKey: CHANNELS_SNAPSHOT_QUERY_KEY })
                 setActive(null)
               }}
             />
