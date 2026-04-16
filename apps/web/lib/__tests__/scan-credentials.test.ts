@@ -69,7 +69,16 @@ describe('scanForSecrets', () => {
   })
 
   it('detects mongodb+srv connection strings', () => {
-    const hits = scanForSecrets('mongodb+srv://admin:pw123@cluster0.mongodb.net/db')
+    // Build at runtime so no Atlas-like URI literal sits in the repo (GitHub secret scanning).
+    const uri =
+      'mongodb+srv://' +
+      'scanner_fixture_user' +
+      ':' +
+      'not_a_real_password' +
+      '@' +
+      'cluster0.example.invalid' +
+      '/db'
+    const hits = scanForSecrets(uri)
     expect(hits.some(h => h.type === 'db_connection_string')).toBe(true)
   })
 
