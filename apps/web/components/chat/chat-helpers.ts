@@ -118,7 +118,8 @@ export function extractLeadingJsonObject(content: string): string | null {
 }
 
 /**
- * Gateway / 工具中间结果 JSON（错误、web_fetch 失败等），应归入「思考过程」时间线，而非最终正文。
+ * Gateway / 工具中间结果 JSON（常见为报错信封）。
+ * 正常工具成功体在 jsonl 里为 `role:"toolResult"`，应由 transcript-parser → `message_type: tool_call` 展示，勿依赖正文猜形状。
  */
 export function looksLikeGatewayToolProcessJson(content: string): boolean {
   const raw = extractLeadingJsonObject(content)
@@ -298,7 +299,7 @@ export function isThinkingProcessMessage(message: ChatMessage, currentUser: Curr
   }
 
   if (message.message_type === 'text') {
-    if (isOpenclawGatewayInfraMessage(message)) return false
+    if (isOpenclawGatewayInfraMessage(message)) return true
     if (looksLikeGatewayToolProcessJson(message.content)) return true
     if (isGatewaySyntheticUserContext(message)) return true
     if (phase === 'thinking') return true
@@ -306,6 +307,11 @@ export function isThinkingProcessMessage(message: ChatMessage, currentUser: Curr
   }
 
   return false
+}
+
+/** 主会话列表仅展示正文（text）；tool_call/status 等仍存库与 store，不在此列表渲染 */
+export function filterVisibleChatMessagesForList(messages: ChatMessage[]): ChatMessage[] {
+  return messages.filter((m) => m.message_type === 'text')
 }
 
 export type ChatDisplayGroup =

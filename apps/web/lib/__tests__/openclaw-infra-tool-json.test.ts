@@ -46,4 +46,14 @@ describe('openclaw-infra-tool-json', () => {
   it('does not match arbitrary JSON', () => {
     expect(matchAnyOpenclawGatewayInfraPayload('{"result":"hello"}')).toBeNull()
   })
+
+  it('matches config read JSON after untrusted-sender style prefix', () => {
+    const json = JSON.stringify({
+      ok: true,
+      result: { path: '/Users/x/.xclaw/openclaw.json', exists: true, raw: '{}' },
+    })
+    const combined = `Sender (untrusted metadata):\n{"label":"cli"}\n[Mon 2026-04-14]\n\n${json}`
+    expect(matchOpenclawConfigFileReadPayload(combined)).toEqual({ path: '/Users/x/.xclaw/openclaw.json' })
+    expect(formatOpenclawGatewayInfraForDisplay(combined)).toContain('openclaw.json')
+  })
 })
