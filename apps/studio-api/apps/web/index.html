@@ -2065,6 +2065,8 @@
         let assetDrawerOpen = false;
         /** 侧栏高亮：'chat' | 'memo' | null；装修按钮高亮见 assetDrawerOpen */
         let studioRailActive = null;
+        /** Studio/OpenClaw 聊天发送中：避免 /status 轮询把底部状态刷回「等待任务中」 */
+        let studioChatStatusOverride = null;
         let assetDrawerAuthed = false;
         let assetManualPanelOpen = false;
         let assetFilterMode = 'all';
@@ -2144,10 +2146,44 @@
         }
 
         // —— OpenClaw：底部输入始终显示；消息列表右侧滑出（与旧版一致）——
+        function getStudioChatBusyStatusLine() {
+            // 不用服务端 currentState（多为 idle→「待命」），避免发送中仍显示待命
+            const l = uiLang || 'zh';
+            if (l === 'en') return '[In chat] Sending and waiting for a reply…';
+            if (l === 'ja') return '[対話中] 送信中。返答を待っています…';
+            return '[对话中] 正在发送并等待回复…';
+        }
+
+        function beginStudioChatStatusOverride() {
+            const busy = getStudioChatBusyStatusLine();
+            studioChatStatusOverride = busy;
+            typewriterText = busy;
+            typewriterTarget = busy;
+            typewriterIndex = busy.length;
+            const st = document.getElementById('status-text');
+            if (st) st.textContent = busy;
+            syncOpenclawStatusLineFromGame();
+            // 像素小人与机房动画：与「整理文档」同款忙碌态，不跟服务端 idle
+            try {
+                if (typeof applyVisualState === 'function') applyVisualState('writing');
+            } catch (e) {}
+        }
+
+        function endStudioChatStatusOverride() {
+            studioChatStatusOverride = null;
+            if (typeof fetchStatus === 'function') fetchStatus();
+            syncOpenclawStatusLineFromGame();
+        }
+
         function syncOpenclawStatusLineFromGame() {
             const st = document.getElementById('status-text');
             const line = document.getElementById('openclaw-status-line');
-            if (st && line) line.textContent = st.textContent || '';
+            if (!line) return;
+            if (studioChatStatusOverride) {
+                line.textContent = studioChatStatusOverride;
+                return;
+            }
+            if (st) line.textContent = st.textContent || '';
         }
 
         function placeOfficePlaqueToolbar() {
@@ -2379,6 +2415,74 @@
             return div;
         }
 
+        function clearOpenclawChatMessages() {
+            const c = document.getElementById('openclaw-chat-messages');
+            if (!c) return;
+            while (c.firstChild) c.removeChild(c.firstChild);
+        }
+
+        (function initXclawStudioParentBridge() {
+            window.addEventListener('message', function (ev) {
+                if (ev.source !== window.parent) return;
+                var d = ev.data;
+                if (!d || !d.type) return;
+                if (d.type === 'xclaw:studio-chat-context') {
+                    var convId = d.conversationId;
+                    window.__xclawStudioConversationId = convId || null;
+                    clearOpenclawChatMessages();
+                    updateOpenclawChatEmptyVisibility();
+                    if (convId && typeof convId === 'string' && window.parent !== window) {
+                        var requestId = 'hist-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+                        window.parent.postMessage(
+                            {
+                                type: 'xclaw:studio-chat-request-history',
+                                requestId: requestId,
+                                conversationId: convId,
+                            },
+                            '*',
+                        );
+                    }
+                    return;
+                }
+                if (d.type === 'xclaw:studio-chat-reply-update') {
+                    var ridU = d.requestId;
+                    var replyU = d.reply;
+                    if (typeof ridU !== 'string' || typeof replyU !== 'string') return;
+                    var bubbleU = document.querySelector('[data-xclaw-request-id="' + ridU + '"]');
+                    if (!bubbleU) return;
+                    bubbleU.classList.remove('typing');
+                    bubbleU.innerHTML = '';
+                    if (!replyU.trim()) {
+                        bubbleU.className = 'openclaw-msg error';
+                        bubbleU.textContent = '未获取到助手回复';
+                    } else {
+                        bubbleU.className = 'openclaw-msg agent';
+                        bubbleU.textContent = replyU.trim();
+                    }
+                    var scrollU = document.getElementById('openclaw-chat-messages');
+                    if (scrollU) scrollU.scrollTop = scrollU.scrollHeight;
+                    return;
+                }
+                if (d.type === 'xclaw:studio-chat-history') {
+                    if (!d.ok) {
+                        appendOpenclawChatMessage('error', (d.error && String(d.error)) || '加载历史失败');
+                        updateOpenclawChatEmptyVisibility();
+                        return;
+                    }
+                    if (Array.isArray(d.messages)) {
+                        d.messages.forEach(function (m) {
+                            if (!m || (m.role !== 'user' && m.role !== 'agent')) return;
+                            if (typeof m.text !== 'string' || !m.text.trim()) return;
+                            appendOpenclawChatMessage(m.role === 'user' ? 'user' : 'agent', m.text);
+                        });
+                    }
+                    updateOpenclawChatEmptyVisibility();
+                    var scrollC = document.getElementById('openclaw-chat-messages');
+                    if (scrollC) scrollC.scrollTop = scrollC.scrollHeight;
+                }
+            });
+        })();
+
         async function sendOpenclawChatMessage() {
             const input = document.getElementById('openclaw-chat-input');
             const btn = document.getElementById('openclaw-chat-send');
@@ -2387,7 +2491,7 @@
             setSidePanelView('chat');
             setOpenclawSideOpen(true);
             setStudioRailActive('chat');
-            syncOpenclawStatusLineFromGame();
+            beginStudioChatStatusOverride();
             if (btn) btn.disabled = true;
             appendOpenclawChatMessage('user', msg);
             if (input) input.value = '';
@@ -2395,11 +2499,13 @@
             try {
                 if (window.parent !== window) {
                     const requestId = 'xclaw-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+                    if (pendingBubble) pendingBubble.setAttribute('data-xclaw-request-id', requestId);
                     const done = await new Promise(function (resolve) {
-                        var timeoutMs = 120000;
+                        /* 首包应秒回；仅防极端卡死 */
+                        var timeoutMs = 300000;
                         var timer = setTimeout(function () {
                             window.removeEventListener('message', onParentMsg);
-                            resolve({ ok: false, err: '等待主应用响应超时' });
+                            resolve({ ok: false, error: '等待主应用响应超时' });
                         }, timeoutMs);
                         function onParentMsg(ev) {
                             var d = ev.data;
@@ -2411,15 +2517,26 @@
                         window.addEventListener('message', onParentMsg);
                         window.parent.postMessage({ type: 'xclaw:studio-chat-send', requestId: requestId, text: msg }, '*');
                     });
-                    if (done.ok && done.reply != null) {
-                        if (pendingBubble) {
-                            pendingBubble.classList.remove('typing');
-                            pendingBubble.textContent = done.reply;
-                        } else {
-                            appendOpenclawChatMessage('agent', done.reply);
+                    var okSend = done && done.ok === true;
+                    var replyStr = (done && done.reply != null) ? String(done.reply).trim() : '';
+                    if (okSend) {
+                        if (replyStr) {
+                            if (pendingBubble) {
+                                pendingBubble.classList.remove('typing');
+                                pendingBubble.textContent = replyStr;
+                            } else {
+                                appendOpenclawChatMessage('agent', replyStr);
+                            }
                         }
+                        /* reply 为空：保持 typing，等待 xclaw:studio-chat-reply-update 写入真实正文 */
                     } else {
-                        var errText = (done && done.error) ? done.error : '请求失败';
+                        var errText = '';
+                        if (done) {
+                            if (done.error != null && String(done.error).trim()) errText = String(done.error).trim();
+                            else if (done.err != null && String(done.err).trim()) errText = String(done.err).trim();
+                            else if (done.msg != null && String(done.msg).trim()) errText = String(done.msg).trim();
+                        }
+                        if (!errText) errText = '请求失败';
                         if (pendingBubble) {
                             pendingBubble.className = 'openclaw-msg error';
                             pendingBubble.textContent = errText;
@@ -2457,8 +2574,10 @@
                 } else {
                     appendOpenclawChatMessage('error', '网络错误: ' + (e.message || e));
                 }
+            } finally {
+                endStudioChatStatusOverride();
+                if (btn) btn.disabled = false;
             }
-            if (btn) btn.disabled = false;
         }
 
         window.openOpenclawChatPanel = openOpenclawChatPanel;
@@ -5177,7 +5296,7 @@ function toggleBrokerPanel() {
                     panToggle.style.background = on ? '#e94560' : '#333';
                 }
                 game.input.setDefaultCursor(on ? 'grab' : 'default');
-                if (isTouchDevice && statusText) {
+                if (isTouchDevice && statusText && !studioChatStatusOverride) {
                     const info = on ? '视野拖动已开启（可左右拖动画布）' : '视野拖动已关闭（点击左上角“移动视野”可开启）';
                     statusText.textContent = `状态：[${(STATES[currentState] && STATES[currentState].name) || '待命'}] ${info}`;
                 }
@@ -5366,8 +5485,11 @@ function toggleBrokerPanel() {
                 lastCatBubble = time;
             }
 
-            // 打字机效果
-            if (typewriterIndex < typewriterTarget.length && time - lastTypewriter > TYPEWRITER_DELAY) {
+            // 打字机效果（Studio 聊天发送中由 studioChatStatusOverride 接管，避免被刷回「等待任务中」）
+            if (studioChatStatusOverride) {
+                if (statusText) statusText.textContent = studioChatStatusOverride;
+                syncOpenclawStatusLineFromGame();
+            } else if (typewriterIndex < typewriterTarget.length && time - lastTypewriter > TYPEWRITER_DELAY) {
                 typewriterText += typewriterTarget[typewriterIndex];
                 statusText.textContent = typewriterText;
                 syncOpenclawStatusLineFromGame();
@@ -5506,30 +5628,41 @@ function toggleBrokerPanel() {
                             currentState = nextState;
                         }
                         applyVisualState(nextState);
+                        if (studioChatStatusOverride) {
+                            try {
+                                applyVisualState('writing');
+                            } catch (e) {}
+                        }
 
-                        if (changed) {
-                            typewriterTarget = nextLine;
-                            typewriterText = '';
-                            typewriterIndex = 0;
-                        } else {
-                            if (!typewriterTarget || typewriterTarget !== nextLine) {
+                        if (!studioChatStatusOverride) {
+                            if (changed) {
                                 typewriterTarget = nextLine;
                                 typewriterText = '';
                                 typewriterIndex = 0;
+                            } else {
+                                if (!typewriterTarget || typewriterTarget !== nextLine) {
+                                    typewriterTarget = nextLine;
+                                    typewriterText = '';
+                                    typewriterIndex = 0;
+                                }
                             }
                         }
                     } catch (err) {
                         console.error('fetchStatus apply error', err);
-                        typewriterTarget = '状态更新异常，正在恢复...';
-                        typewriterText = '';
-                        typewriterIndex = 0;
+                        if (!studioChatStatusOverride) {
+                            typewriterTarget = '状态更新异常，正在恢复...';
+                            typewriterText = '';
+                            typewriterIndex = 0;
+                        }
                     }
                 })
                 .catch(error => {
                     console.warn('状态拉取失败，将重试:', error?.message || error);
-                    typewriterTarget = '连接失败，正在重试...';
-                    typewriterText = '';
-                    typewriterIndex = 0;
+                    if (!studioChatStatusOverride) {
+                        typewriterTarget = '连接失败，正在重试...';
+                        typewriterText = '';
+                        typewriterIndex = 0;
+                    }
                 });
         }
 

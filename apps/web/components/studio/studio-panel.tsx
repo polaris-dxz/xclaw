@@ -4,14 +4,22 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { AlertCircle, Loader2 } from 'lucide-react'
 import { buildStudioBaseUrl, buildStudioEmbedUrl, buildStudioHealthUrl } from '@/lib/studio/runtime'
-import { sendStudioChatMessage } from '@/lib/studio/send-studio-chat'
+import { pollStudioAssistantReply, sendStudioChatMessage } from '@/lib/studio/send-studio-chat'
+import { chatMessagesToStudioWire } from '@/lib/studio/studio-history-wire'
+import { hydrateChatMessagesAttachments } from '@/lib/chat-sync'
 import {
   STUDIO_CHAT_CONTEXT,
+  STUDIO_CHAT_HISTORY,
+  STUDIO_CHAT_REQUEST_HISTORY,
+  STUDIO_CHAT_REPLY_UPDATE,
   STUDIO_CHAT_RESULT,
   STUDIO_CHAT_SEND,
+  type StudioChatHistoryPayload,
+  type StudioChatReplyUpdatePayload,
   type StudioChatResultPayload,
 } from '@/lib/studio/studio-chat-protocol'
-import { useXClawStore } from '@/store'
+import { studioEmbedOriginsCompatible } from '@/lib/studio/studio-embed-origin'
+import { useXClawStore, type ChatMessage } from '@/store'
 import { Button } from '@/components/ui/button'
 
 export function StudioPanel() {
@@ -25,11 +33,8 @@ export function StudioPanel() {
     const win = iframeRef.current?.contentWindow
     if (!win || !studioUrl) return
     try {
-      const targetOrigin = new URL(studioUrl).origin
-      win.postMessage(
-        { type: STUDIO_CHAT_CONTEXT, conversationId: activeConversation ?? null },
-        targetOrigin
-      )
+      // 使用 *：Studio 实际 URL 可能是 localhost:PORT 而 health 返回 127.0.0.1:PORT，严格 origin 会导致消息被浏览器丢弃。
+      win.postMessage({ type: STUDIO_CHAT_CONTEXT, conversationId: activeConversation ?? null }, '*')
     } catch {
       // ignore invalid studioUrl
     }
@@ -89,43 +94,160 @@ export function StudioPanel() {
   }, [pushChatContextToIframe])
 
   useEffect(() => {
-    const onMessage = async (ev: MessageEvent) => {
-      if (ev.source !== iframeRef.current?.contentWindow) return
-      if (!studioUrl) return
-      let allowedOrigin: string
+    const postToIframe = (
+      payload:
+        | StudioChatResultPayload
+        | StudioChatHistoryPayload
+        | StudioChatReplyUpdatePayload,
+      target: Window | null | undefined,
+    ) => {
+      const win = target ?? iframeRef.current?.contentWindow
+      if (!win) return
+      if (!target && !studioUrl) return
       try {
-        allowedOrigin = new URL(studioUrl).origin
+        win.postMessage(payload, '*')
+      } catch {
+        // ignore
+      }
+    }
+
+    const onMessage = async (ev: MessageEvent) => {
+      const replyTarget =
+        ev.source && typeof (ev.source as Window).postMessage === 'function'
+          ? (ev.source as Window)
+          : null
+      if (!replyTarget) return
+      if (!studioUrl) return
+      let expectedOrigin: string
+      try {
+        expectedOrigin = new URL(studioUrl).origin
       } catch {
         return
       }
-      if (ev.origin !== allowedOrigin) return
+      if (!studioEmbedOriginsCompatible(ev.origin, expectedOrigin)) return
 
-      const data = ev.data as { type?: string; requestId?: string; text?: string }
-      if (!data || data.type !== STUDIO_CHAT_SEND || typeof data.requestId !== 'string') return
+      const data = ev.data as {
+        type?: string
+        requestId?: string
+        text?: string
+        conversationId?: string
+      }
+      if (!data?.type) return
+
+      if (data.type === STUDIO_CHAT_REQUEST_HISTORY) {
+        const requestId = typeof data.requestId === 'string' ? data.requestId : ''
+        const conversationId = typeof data.conversationId === 'string' ? data.conversationId.trim() : ''
+        if (!requestId || !conversationId) {
+          postToIframe(
+            {
+              type: STUDIO_CHAT_HISTORY,
+              requestId: requestId || 'unknown',
+              ok: false,
+              error: '缺少 conversationId',
+            },
+            replyTarget,
+          )
+          return
+        }
+        try {
+          const res = await fetch(
+            `/api/chat/messages?conversation_id=${encodeURIComponent(conversationId)}&limit=200`,
+            { cache: 'no-store', credentials: 'include' },
+          )
+          const body = (await res.json().catch(() => ({}))) as { messages?: ChatMessage[]; error?: string }
+          if (!res.ok) {
+            postToIframe(
+              {
+                type: STUDIO_CHAT_HISTORY,
+                requestId,
+                ok: false,
+                error: typeof body.error === 'string' && body.error.trim()
+                  ? body.error
+                  : `HTTP ${res.status}`,
+              },
+              replyTarget,
+            )
+            return
+          }
+          const raw = Array.isArray(body.messages) ? body.messages : []
+          const hydrated = hydrateChatMessagesAttachments(raw as ChatMessage[])
+          const currentUser = useXClawStore.getState().currentUser
+          const messages = chatMessagesToStudioWire(hydrated, currentUser)
+          postToIframe({ type: STUDIO_CHAT_HISTORY, requestId, ok: true, messages }, replyTarget)
+        } catch (e: unknown) {
+          postToIframe(
+            {
+              type: STUDIO_CHAT_HISTORY,
+              requestId,
+              ok: false,
+              error: e instanceof Error && e.message.trim() ? e.message : '加载历史失败',
+            },
+            replyTarget,
+          )
+        }
+        return
+      }
+
+      if (data.type !== STUDIO_CHAT_SEND || typeof data.requestId !== 'string') return
       const text = typeof data.text === 'string' ? data.text : ''
 
       const replyPayload = (partial: Omit<StudioChatResultPayload, 'type' | 'requestId'> & { requestId: string }) => {
-        const win = iframeRef.current?.contentWindow
-        if (!win) return
-        const payload: StudioChatResultPayload = {
-          type: STUDIO_CHAT_RESULT,
-          requestId: partial.requestId,
-          ok: partial.ok,
-          error: partial.error,
-          reply: partial.reply,
+        const ok = Boolean(partial.ok)
+        const errTrim =
+          typeof partial.error === 'string' && partial.error.trim() ? partial.error.trim() : ''
+        if (ok) {
+          const reply = typeof partial.reply === 'string' ? partial.reply : ''
+          postToIframe(
+            { type: STUDIO_CHAT_RESULT, requestId: partial.requestId, ok: true, reply },
+            replyTarget,
+          )
+          return
         }
-        win.postMessage(payload, allowedOrigin)
+        postToIframe(
+          {
+            type: STUDIO_CHAT_RESULT,
+            requestId: partial.requestId,
+            ok: false,
+            error: errTrim || '发送失败',
+          },
+          replyTarget,
+        )
       }
 
-      const result = await sendStudioChatMessage(text)
-      if (!result.ok) {
-        replyPayload({ requestId: data.requestId, ok: false, error: result.error })
-        return
+      try {
+        const result = await sendStudioChatMessage(text, { awaitAssistantReply: false })
+        if (!result.ok) {
+          replyPayload({ requestId: data.requestId, ok: false, error: result.error })
+          return
+        }
+        const firstReply = typeof result.reply === 'string' ? result.reply : ''
+        replyPayload({ requestId: data.requestId, ok: true, reply: firstReply })
+
+        const { conversationId, userMessageCreatedAt } = result
+        const targetWin = replyTarget
+        const studioRequestId = data.requestId
+        void pollStudioAssistantReply(conversationId, userMessageCreatedAt, 90_000).then((late) => {
+          const t = late?.trim()
+          if (!t) {
+            postToIframe(
+              { type: STUDIO_CHAT_REPLY_UPDATE, requestId: studioRequestId, reply: '' },
+              targetWin,
+            )
+            return
+          }
+          if (firstReply.trim() === t) return
+          postToIframe(
+            { type: STUDIO_CHAT_REPLY_UPDATE, requestId: studioRequestId, reply: t },
+            targetWin,
+          )
+        })
+      } catch (e: unknown) {
+        replyPayload({
+          requestId: data.requestId,
+          ok: false,
+          error: e instanceof Error && e.message.trim() ? e.message : '发送失败',
+        })
       }
-      const replyText =
-        result.reply?.trim() ||
-        '消息已发送到当前会话，可在左侧「对话」中查看完整回复与上下文。'
-      replyPayload({ requestId: data.requestId, ok: true, reply: replyText })
     }
 
     window.addEventListener('message', onMessage)
@@ -141,7 +263,10 @@ export function StudioPanel() {
           title="Star Office Studio"
           src={buildStudioEmbedUrl(studioUrl)}
           className="block h-full min-h-0 w-full border-0"
-          onLoad={pushChatContextToIframe}
+          onLoad={() => {
+            pushChatContextToIframe()
+            requestAnimationFrame(() => pushChatContextToIframe())
+          }}
         />
       </div>
     )

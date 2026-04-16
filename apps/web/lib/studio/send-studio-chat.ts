@@ -5,12 +5,21 @@ import {
   useXClawStore,
   type ChatMessage,
   type Conversation,
+  type CurrentUser,
 } from '@/store'
-import { resolveOutgoingRecipient, stripInlinedAttachmentPreviewFromUserContent } from '@/components/chat/chat-helpers'
+import {
+  isGatewaySyntheticUserContext,
+  isUserChatMessage,
+  resolveOutgoingRecipient,
+  stripAssistantXmlFinalWrapper,
+  stripInlinedAttachmentPreviewFromUserContent,
+  stripOpenClawAssistantFooter,
+} from '@/components/chat/chat-helpers'
+import { hasPersistedAssistantFinalForConversation } from '@/lib/awaiting-reply'
 import { isPendingConversation } from '@/lib/pending-conversation'
 import { setConversationTitleOverride } from '@/lib/conversation-title-overrides'
 import { buildFirstMessageSessionLabel } from '@/lib/session-label'
-import { fetchConversationMessages } from '@/lib/chat-sync'
+import { fetchConversationMessages, mergeConversationIntoMessages } from '@/lib/chat-sync'
 import { STUDIO_COMPOSER_AGENT_SESSION_KEY } from '@/lib/studio/composer-session'
 
 const LOCAL_SELECTED_MODEL_KEY = 'mc-selected-model'
@@ -39,43 +48,82 @@ function fallbackCoordinator(): string {
   return process.env.NEXT_PUBLIC_COORDINATOR_AGENT || 'main'
 }
 
-/** 轮询直到出现用户消息之后的助手可见回复（或超时） */
-async function pollAssistantReplyText(
+function extractLatestAssistantDisplay(
+  messages: ChatMessage[],
   conversationId: string,
   userMessageCreatedAt: number,
-  maxMs: number
-): Promise<string | null> {
-  const deadline = Date.now() + maxMs
-  while (Date.now() < deadline) {
-    const msgs = await fetchConversationMessages(conversationId, {
-      since: Math.max(0, userMessageCreatedAt - 1),
-      limit: 80,
-    })
-    const afterUser = msgs.filter(
-      (m) => m.conversation_id === conversationId && m.created_at > userMessageCreatedAt
-    )
-    const assistant = [...afterUser].reverse().find((m) => {
-      if (m.from_agent === 'you') return false
-      if (m.message_type === 'status') return false
-      const raw = String(m.content || '').trim()
-      return raw.length > 0
-    })
-    if (assistant) {
-      return stripInlinedAttachmentPreviewFromUserContent(String(assistant.content || '')).trim() || null
-    }
-    await new Promise((r) => setTimeout(r, 2000))
+  currentUser: CurrentUser | null,
+): string | null {
+  const after = messages.filter(
+    (m) => m.conversation_id === conversationId && m.created_at > userMessageCreatedAt,
+  )
+  const sorted = [...after].sort((a, b) => a.created_at - b.created_at)
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const m = sorted[i]
+    if (m.message_type !== 'text') continue
+    if (isUserChatMessage(m, currentUser)) continue
+    if (isGatewaySyntheticUserContext(m)) continue
+    const raw = stripOpenClawAssistantFooter(
+      stripAssistantXmlFinalWrapper(
+        stripInlinedAttachmentPreviewFromUserContent(String(m.content || '')).trim(),
+      ),
+    ).trim()
+    if (raw.length > 0) return raw
   }
   return null
 }
 
+/**
+ * 轮询直到出现「可视为终稿」的助手回复（与 ChatPanel / awaiting-reply 对齐）或超时。
+ * Studio 父窗口在首包 postMessage 后可在后台继续调用本函数，避免 iframe 内 Promise 长时间挂起超时。
+ */
+export async function pollStudioAssistantReply(
+  conversationId: string,
+  userMessageCreatedAt: number,
+  maxMs = 90_000,
+): Promise<string | null> {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const currentUser = useXClawStore.getState().currentUser
+    const msgs = await fetchConversationMessages(conversationId, {
+      since: Math.max(0, userMessageCreatedAt - 5),
+      limit: 120,
+    })
+    const convSlice = msgs.filter(
+      (m) => m.conversation_id === conversationId && m.created_at >= userMessageCreatedAt - 2,
+    )
+    if (hasPersistedAssistantFinalForConversation(convSlice, conversationId, currentUser)) {
+      const text = extractLatestAssistantDisplay(msgs, conversationId, userMessageCreatedAt, currentUser)
+      if (text) return text
+    }
+    const elapsed = Date.now() - start
+    await new Promise((r) => setTimeout(r, elapsed < 45_000 ? 700 : 2000))
+  }
+  const currentUser = useXClawStore.getState().currentUser
+  const tail = await fetchConversationMessages(conversationId, { limit: 200 })
+  return extractLatestAssistantDisplay(tail, conversationId, userMessageCreatedAt, currentUser)
+}
+
+export type SendStudioChatOptions = {
+  /**
+   * false：POST 成功后立即返回（reply 多为 null），由调用方自行轮询 `pollStudioAssistantReply` 再更新 iframe，
+   * 避免 Studio 内嵌页「等待主应用响应」与 120s Promise 超时。
+   * true：在函数内阻塞轮询至终稿或超时（仅适合非 iframe 场景）。
+   */
+  awaitAssistantReply?: boolean
+}
+
 export type SendStudioChatResult =
-  | { ok: true; reply: string | null; conversationId: string }
+  | { ok: true; reply: string | null; conversationId: string; userMessageCreatedAt: number }
   | { ok: false; error: string }
 
 /**
  * 使用当前侧栏 activeConversation 与主输入区同款收件人解析（sessionStorage + 会话 id）。
  */
-export async function sendStudioChatMessage(trimmedText: string): Promise<SendStudioChatResult> {
+export async function sendStudioChatMessage(
+  trimmedText: string,
+  options?: SendStudioChatOptions,
+): Promise<SendStudioChatResult> {
   const text = trimmedText.trim()
   if (!text) {
     return { ok: false, error: '消息不能为空' }
@@ -207,7 +255,7 @@ export async function sendStudioChatMessage(trimmedText: string): Promise<SendSt
   const data = (await response.json().catch(() => ({}))) as {
     message?: ChatMessage
     error?: string
-    forward?: { attempted?: boolean; delivered?: boolean; runId?: string }
+    forward?: { attempted?: boolean; delivered?: boolean; runId?: string; reason?: string }
   }
 
   if (!response.ok) {
@@ -220,10 +268,46 @@ export async function sendStudioChatMessage(trimmedText: string): Promise<SendSt
     return { ok: false, error: err }
   }
 
+  const { chatMessages: allBefore, setChatMessages, currentUser, setAwaitingReply } = useXClawStore.getState()
+  if (data.message) {
+    setChatMessages(mergeConversationIntoMessages(allBefore, convId, [data.message], currentUser))
+  }
+
+  const attempted = Boolean(data?.forward?.attempted)
+  const delivered = Boolean(data?.forward?.delivered)
+  if (attempted && !delivered) {
+    const reason = typeof data.forward?.reason === 'string' ? data.forward.reason.trim() : ''
+    return {
+      ok: false,
+      error: reason ? `网关未接受消息：${reason}` : '网关未接受消息，请检查网关连接与配置。',
+    }
+  }
+
   const userMsg = data.message
   const userTs =
     userMsg && typeof userMsg.created_at === 'number' ? userMsg.created_at : Math.floor(Date.now() / 1000)
 
-  const reply = await pollAssistantReplyText(convId, userTs, 90_000)
-  return { ok: true, reply, conversationId: convId }
+  const runId = typeof data?.forward?.runId === 'string' ? data.forward.runId : null
+  const latest = useXClawStore.getState().chatMessages
+  const scoped = latest.filter((m) => m.conversation_id === convId && m.created_at >= userTs - 3)
+  const alreadyDone = hasPersistedAssistantFinalForConversation(scoped, convId, currentUser)
+  if (delivered && runId && !alreadyDone) {
+    setAwaitingReply({ waiting: true, conversationId: convId, runId })
+  } else {
+    setAwaitingReply({ waiting: false })
+  }
+
+  const awaitAssistantReply = options?.awaitAssistantReply !== false
+
+  if (!awaitAssistantReply) {
+    useXClawStore.getState().setAwaitingReply({ waiting: false })
+    return { ok: true, reply: null, conversationId: convId, userMessageCreatedAt: userTs }
+  }
+
+  try {
+    const reply = await pollStudioAssistantReply(convId, userTs, 90_000)
+    return { ok: true, reply, conversationId: convId, userMessageCreatedAt: userTs }
+  } finally {
+    useXClawStore.getState().setAwaitingReply({ waiting: false })
+  }
 }

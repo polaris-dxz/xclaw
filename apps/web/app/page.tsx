@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { AppHeader } from '@/components/layout/app-header'
 import { ChatSidebar } from '@/components/chat/chat-sidebar'
 import { ChatPanel } from '@/components/chat/chat-panel'
+import { StudioConversationBridge } from '@/components/studio/studio-conversation-bridge'
 import { StudioPanel } from '@/components/studio/studio-panel'
 import { useXClawStore } from '@/store'
 import { useServerEvents } from '@/lib/use-server-events'
@@ -199,6 +200,7 @@ export default function Home() {
               className="flex flex-1 min-h-0 min-w-0"
               style={{ backgroundColor: STUDIO_CHROME_BG }}
             >
+              <StudioConversationBridge />
               <StudioPanel />
             </motion.div>
           )}
