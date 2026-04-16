@@ -17,6 +17,10 @@ import { useModelSetupGate } from '@/lib/use-model-setup-gate'
 /** 与嵌入的 Star 像素办公室页面 body 背景一致（studio-api apps/web/index.html） */
 const STUDIO_CHROME_BG = '#1a1a2e'
 
+function isBootFetchAbort(error: unknown): boolean {
+  return error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')
+}
+
 export default function Home() {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState<'chat' | 'studio'>('chat')
@@ -43,7 +47,11 @@ export default function Home() {
     let cancelled = false
     const fetchWithTimeout = async (url: string, timeoutMs = 8000) => {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      const timer = setTimeout(() => {
+        controller.abort(
+          new DOMException(`Boot fetch exceeded ${timeoutMs}ms: ${url}`, 'TimeoutError'),
+        )
+      }, timeoutMs)
       try {
         return await fetch(url, { cache: 'no-store', signal: controller.signal })
       } finally {
@@ -76,7 +84,11 @@ export default function Home() {
             if (!primary?.id) return null
 
             const controller = new AbortController()
-            const timer = setTimeout(() => controller.abort(), 8000)
+            const timer = setTimeout(() => {
+              controller.abort(
+                new DOMException('Boot fetch exceeded 8000ms: /api/gateways/connect', 'TimeoutError'),
+              )
+            }, 8000)
             const connectRes = await fetch('/api/gateways/connect', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -107,7 +119,14 @@ export default function Home() {
           connect(wsUrlFallback)
         }
       } catch (error) {
-        console.error('Boot check failed', error)
+        if (isBootFetchAbort(error)) {
+          // 超时取消：避免 console.error 触发 Next 开发环境全屏 AbortError overlay
+          if (process.env.NODE_ENV === 'development') {
+            console.debug('[boot] request timed out; UI continues', error)
+          }
+        } else {
+          console.error('Boot check failed', error)
+        }
       } finally {
         if (!cancelled) setBootChecking(false)
       }
