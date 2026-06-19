@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "concurrently": "^9.0.0",
-    "turbo": "^2.5.8"
+    "turbo": "^2.9.14"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
